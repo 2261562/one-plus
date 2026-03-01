@@ -1,0 +1,17 @@
+# 编辑器/IDE 文件
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+._*
+
+# 编译产物（本地调试时）
+kernel_workspace/
+AnyKernel3/
+out/
+*.img
+*.zip

@@ -1,0 +1,367 @@
+name: Build OnePlus ACE 3V Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      MANIFEST_BRANCH:
+        description: "Manifest 分支（SoC 平台）"
+        required: true
+        default: "sm7675"
+        type: choice
+        options:
+          - sm7675
+
+      MANIFEST_XML:
+        description: "设备 Manifest XML（不含 .xml 后缀）"
+        required: true
+        default: "oneplus_ace_3v_b"
+        type: choice
+        options:
+          - oneplus_ace_3v_b
+          - oneplus_ace_3v_v
+
+      CPUD:
+        description: "处理器代号"
+        required: true
+        default: "pineapple"
+
+      ANDROID_VERSION:
+        description: "Android 版本（用于 KernelSU/补丁匹配）"
+        required: true
+        default: "android14"
+        type: choice
+        options:
+          - android14
+          - android15
+          - android16
+
+      KERNEL_VERSION:
+        description: "内核版本"
+        required: true
+        default: "6.1"
+
+      KERNELSU_ENABLED:
+        description: "集成 KernelSU Next"
+        required: true
+        type: boolean
+        default: true
+
+      KERNELSU_BRANCH:
+        description: "KernelSU Next 分支"
+        required: true
+        default: "next"
+
+      APPLY_CUSTOM_PATCHES:
+        description: "应用自定义补丁（patches/ 目录）"
+        required: true
+        type: boolean
+        default: false
+
+      APPLY_CUSTOM_DEFCONFIG:
+        description: "应用自定义内核配置（config/custom_defconfig.fragment）"
+        required: true
+        type: boolean
+        default: false
+
+      ENABLE_DOCKER:
+        description: "开启 Docker/容器 支持（内核配置）"
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    name: "Build Kernel"
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      # ========================================
+      # 1. 准备构建环境
+      # ========================================
+      - name: 最大化构建空间
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 配置 Git
+        run: |
+          git config --global user.name "kernel-builder"
+          git config --global user.email "builder@github.actions"
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 python-is-python3 git curl wget \
+            bc bison build-essential ccache flex \
+            libelf-dev libssl-dev libncurses-dev \
+            zip unzip cpio
+
+      - name: 安装 repo 工具
+        run: |
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
+          chmod a+x ~/repo
+          sudo mv ~/repo /usr/local/bin/repo
+
+      # ========================================
+      # 2. 拉取内核源码
+      # ========================================
+      - name: 初始化并同步内核源码
+        run: |
+          mkdir kernel_workspace && cd kernel_workspace
+          echo "::group::repo init"
+          repo init \
+            -u https://github.com/OnePlusOSS/kernel_manifest.git \
+            -b refs/heads/oneplus/${{ github.event.inputs.MANIFEST_BRANCH }} \
+            -m ${{ github.event.inputs.MANIFEST_XML }}.xml \
+            --depth=1
+          echo "::endgroup::"
+
+          echo "::group::repo sync"
+          repo sync -c -j$(nproc) --no-tags --no-clone-bundle --optimized-fetch
+          echo "::endgroup::"
+
+      - name: 清理 ABI 保护导出（防止编译报错）
+        run: |
+          cd kernel_workspace
+          rm -f kernel_platform/common/android/abi_gki_protected_exports_* || true
+          rm -f kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || true
+
+      - name: 移除 -dirty 后缀
+        run: |
+          cd kernel_workspace
+          sed -i 's/ -dirty//g' kernel_platform/common/scripts/setlocalversion
+          sed -i 's/ -dirty//g' kernel_platform/msm-kernel/scripts/setlocalversion
+
+      # ========================================
+      # 3. 集成 KernelSU Next
+      # ========================================
+      - name: 集成 KernelSU Next
+        if: github.event.inputs.KERNELSU_ENABLED == 'true'
+        run: |
+          cd kernel_workspace/kernel_platform
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s ${{ github.event.inputs.KERNELSU_BRANCH }}
+
+          # 计算并设置 KSU 版本号
+          cd KernelSU-Next
+          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count HEAD) "+" 10200)
+          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          echo "✅ KernelSU Next 版本: $KSU_VERSION"
+          sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+
+      - name: 设置 KSU 版本（未启用时）
+        if: github.event.inputs.KERNELSU_ENABLED != 'true'
+        run: echo "KSUVER=none" >> $GITHUB_ENV
+
+      # ========================================
+      # 4. 自定义内核修改（预留）
+      # ========================================
+      - name: 应用自定义补丁
+        if: github.event.inputs.APPLY_CUSTOM_PATCHES == 'true'
+        run: |
+          cd kernel_workspace/kernel_platform
+          PATCH_DIR="${GITHUB_WORKSPACE}/patches"
+
+          if [ -d "$PATCH_DIR" ] && [ "$(ls -A $PATCH_DIR/*.patch 2>/dev/null)" ]; then
+            echo "📦 发现自定义补丁，开始应用..."
+
+            # 应用 common 内核补丁
+            if ls "$PATCH_DIR"/common_*.patch 1>/dev/null 2>&1; then
+              echo "  → 应用 common 内核补丁"
+              cd common
+              for patch in "$PATCH_DIR"/common_*.patch; do
+                echo "    应用: $(basename $patch)"
+                patch -p1 --forward < "$patch" || echo "⚠️ 补丁 $(basename $patch) 应用失败，跳过"
+              done
+              git add -A && git commit -m "Apply custom common patches" || true
+              cd ..
+            fi
+
+            # 应用 msm-kernel 补丁
+            if ls "$PATCH_DIR"/msm_*.patch 1>/dev/null 2>&1; then
+              echo "  → 应用 msm-kernel 补丁"
+              cd msm-kernel
+              for patch in "$PATCH_DIR"/msm_*.patch; do
+                echo "    应用: $(basename $patch)"
+                patch -p1 --forward < "$patch" || echo "⚠️ 补丁 $(basename $patch) 应用失败，跳过"
+              done
+              git add -A && git commit -m "Apply custom msm-kernel patches" || true
+              cd ..
+            fi
+
+            # 应用通用补丁（在 kernel_platform 根目录）
+            if ls "$PATCH_DIR"/platform_*.patch 1>/dev/null 2>&1; then
+              echo "  → 应用 kernel_platform 根目录补丁"
+              for patch in "$PATCH_DIR"/platform_*.patch; do
+                echo "    应用: $(basename $patch)"
+                patch -p1 --forward < "$patch" || echo "⚠️ 补丁 $(basename $patch) 应用失败，跳过"
+              done
+            fi
+
+            echo "✅ 自定义补丁应用完成"
+          else
+            echo "⚠️ patches/ 目录为空或不存在，跳过"
+          fi
+
+      - name: 应用 Docker/容器 内核配置
+        if: github.event.inputs.ENABLE_DOCKER == 'true'
+        run: |
+          cd kernel_workspace/kernel_platform
+          DOCKER_FRAGMENT="${GITHUB_WORKSPACE}/config/docker_defconfig.fragment"
+
+          if [ -f "$DOCKER_FRAGMENT" ]; then
+            echo "🐳 应用 Docker 内核配置 fragment..."
+            # 查找 vendor defconfig 并追加 Docker 相关配置
+            DEFCONFIG_DIR="msm-kernel/arch/arm64/configs"
+            VENDOR_DEFCONFIG=$(find "$DEFCONFIG_DIR" -name "*pineapple*" -o -name "*sm7675*" | head -1)
+
+            if [ -n "$VENDOR_DEFCONFIG" ]; then
+              echo "" >> "$VENDOR_DEFCONFIG"
+              echo "# Docker/Container Support" >> "$VENDOR_DEFCONFIG"
+              cat "$DOCKER_FRAGMENT" >> "$VENDOR_DEFCONFIG"
+              echo "✅ Docker 配置已追加到: $VENDOR_DEFCONFIG"
+            else
+              echo "⚠️ 未找到 vendor defconfig，尝试追加到 common gki_defconfig"
+              GKI_DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
+              if [ -f "$GKI_DEFCONFIG" ]; then
+                echo "" >> "$GKI_DEFCONFIG"
+                echo "# Docker/Container Support" >> "$GKI_DEFCONFIG"
+                cat "$DOCKER_FRAGMENT" >> "$GKI_DEFCONFIG"
+                echo "✅ Docker 配置已追加到: $GKI_DEFCONFIG"
+              fi
+            fi
+
+            cd msm-kernel && git add -A && git commit -m "Enable Docker support" || true
+            cd ../common && git add -A && git commit -m "Enable Docker support" || true
+          else
+            echo "⚠️ config/docker_defconfig.fragment 不存在，跳过"
+          fi
+
+      - name: 应用自定义 defconfig fragment
+        if: github.event.inputs.APPLY_CUSTOM_DEFCONFIG == 'true'
+        run: |
+          cd kernel_workspace/kernel_platform
+          CUSTOM_FRAGMENT="${GITHUB_WORKSPACE}/config/custom_defconfig.fragment"
+
+          if [ -f "$CUSTOM_FRAGMENT" ]; then
+            echo "⚙️ 应用自定义 defconfig fragment..."
+            DEFCONFIG_DIR="msm-kernel/arch/arm64/configs"
+            VENDOR_DEFCONFIG=$(find "$DEFCONFIG_DIR" -name "*pineapple*" -o -name "*sm7675*" | head -1)
+
+            if [ -n "$VENDOR_DEFCONFIG" ]; then
+              echo "" >> "$VENDOR_DEFCONFIG"
+              echo "# Custom Kernel Config" >> "$VENDOR_DEFCONFIG"
+              cat "$CUSTOM_FRAGMENT" >> "$VENDOR_DEFCONFIG"
+              echo "✅ 自定义配置已追加到: $VENDOR_DEFCONFIG"
+            fi
+
+            cd msm-kernel && git add -A && git commit -m "Apply custom defconfig" || true
+            cd ../common && git add -A && git commit -m "Apply custom defconfig" || true
+          else
+            echo "⚠️ config/custom_defconfig.fragment 不存在，跳过"
+          fi
+
+      # ========================================
+      # 5. 编译内核
+      # ========================================
+      - name: 编译内核
+        run: |
+          cd kernel_workspace
+          echo "🔨 开始编译内核..."
+          echo "  处理器代号: ${{ github.event.inputs.CPUD }}"
+          echo "  配置文件: ${{ github.event.inputs.MANIFEST_XML }}"
+          ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} gki
+
+      # ========================================
+      # 6. 打包产物
+      # ========================================
+      - name: 验证编译产物
+        run: |
+          DIST_DIR="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist"
+          if [ ! -f "$DIST_DIR/Image" ]; then
+            echo "❌ 编译失败：未找到 Image 文件"
+            echo "尝试在其他目录查找..."
+            find kernel_workspace/kernel_platform/out -name "Image" -type f 2>/dev/null || true
+            exit 1
+          fi
+          echo "✅ 内核 Image 编译成功"
+          ls -lh "$DIST_DIR/Image"
+
+      - name: 生成构建信息
+        run: |
+          BUILD_DATE=$(date -u +"%Y%m%d_%H%M%S")
+          echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
+
+          # 生成构建摘要
+          cat << EOF > build_info.txt
+          =================================
+          OnePlus ACE 3V Kernel Build Info
+          =================================
+          构建时间: $BUILD_DATE (UTC)
+          设备: OnePlus ACE 3V
+          SoC: Snapdragon 7+ Gen 3 (SM7675)
+          Manifest: ${{ github.event.inputs.MANIFEST_XML }}
+          处理器代号: ${{ github.event.inputs.CPUD }}
+          Android 版本: ${{ github.event.inputs.ANDROID_VERSION }}
+          内核版本: ${{ github.event.inputs.KERNEL_VERSION }}
+          KernelSU: ${{ github.event.inputs.KERNELSU_ENABLED }} (版本: ${{ env.KSUVER }})
+          Docker 支持: ${{ github.event.inputs.ENABLE_DOCKER }}
+          自定义补丁: ${{ github.event.inputs.APPLY_CUSTOM_PATCHES }}
+          自定义 Defconfig: ${{ github.event.inputs.APPLY_CUSTOM_DEFCONFIG }}
+          =================================
+          EOF
+          cat build_info.txt
+
+      - name: 打包 AnyKernel3
+        run: |
+          git clone https://github.com/Kernel-SU/AnyKernel3 --depth=1
+          rm -rf ./AnyKernel3/.git
+
+          # 复制内核 Image
+          DIST_DIR="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist"
+          cp "$DIST_DIR/Image" ./AnyKernel3/
+
+          # 复制 dtbo（如果存在）
+          if [ -f "$DIST_DIR/dtbo.img" ]; then
+            cp "$DIST_DIR/dtbo.img" ./AnyKernel3/
+            echo "✅ 已包含 dtbo.img"
+          fi
+
+          # 添加构建信息
+          cp build_info.txt ./AnyKernel3/
+
+          echo "✅ AnyKernel3 打包完成"
+          ls -la ./AnyKernel3/
+
+      # ========================================
+      # 7. 上传产物
+      # ========================================
+      - name: 上传 AnyKernel3
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyKernel3_ACE3V_KSU-${{ env.KSUVER }}_${{ env.BUILD_DATE }}
+          path: ./AnyKernel3/*
+          compression-level: 9
+
+      - name: 生成构建摘要
+        run: |
+          echo "## 🎉 OnePlus ACE 3V 内核编译完成" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 配置项 | 值 |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 设备 | OnePlus ACE 3V |" >> $GITHUB_STEP_SUMMARY
+          echo "| Manifest | \`${{ github.event.inputs.MANIFEST_XML }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| KernelSU | ${{ github.event.inputs.KERNELSU_ENABLED }} (v${{ env.KSUVER }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Docker | ${{ github.event.inputs.ENABLE_DOCKER }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 构建时间 | ${{ env.BUILD_DATE }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📦 请在 Artifacts 中下载 AnyKernel3 ZIP" >> $GITHUB_STEP_SUMMARY
