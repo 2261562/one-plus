@@ -123,7 +123,8 @@ jobs:
             -u https://github.com/OnePlusOSS/kernel_manifest.git \
             -b refs/heads/oneplus/${{ github.event.inputs.MANIFEST_BRANCH }} \
             -m ${{ github.event.inputs.MANIFEST_XML }}.xml \
-            --depth=1
+            --depth=1 \
+            --repo-url=https://github.com/GerritCodeReview/git-repo.git
           echo "::endgroup::"
 
           echo "::group::repo sync"
