@@ -1,6 +1,10 @@
 name: Build OnePlus ACE 3V Kernel
 
 on:
+  push:
+    branches: [ master ]
+    paths:
+      - '.github/workflows/build-kernel.yml'
   workflow_dispatch:
     inputs:
       MANIFEST_BRANCH:
