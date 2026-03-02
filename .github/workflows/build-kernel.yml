@@ -89,6 +89,16 @@ jobs:
           remove-haskell: "true"
           remove-codeql: "true"
 
+      - name: 配置 Swap 分区
+        run: |
+          echo "🔍 正在创建 Swap 文件 (12GB)..."
+          sudo fallocate -l 12G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "✅ Swap 配置完成:"
+          free -h
+
       - name: 检出仓库
         uses: actions/checkout@v4
 
@@ -104,7 +114,7 @@ jobs:
             python3 python-is-python3 git curl wget \
             bc bison build-essential ccache flex \
             libelf-dev libssl-dev libncurses-dev \
-            zip unzip cpio
+            zip unzip cpio procps htop
 
       - name: 安装 repo 工具
         run: |
@@ -279,14 +289,34 @@ jobs:
           cd kernel_workspace
           echo "🔨 开始编译内核..."
 
-          # 启动资源监控
-          (while true; do echo "$(date): Memory $(free -h | grep Mem | awk '{print $3}')"; sleep 300; done) &
+          # 预先创建输出目录，修复 mktemp: No such file or directory 报错
+          mkdir -p "out/target/product/${{ github.event.inputs.CPUD }}"
+
+          # 启动增强型资源监控 (每60秒一次)
+          (while true; do 
+            TIMESTAMP=$(date +"%H:%M:%S")
+            MEM_USED=$(free -h | grep Mem | awk '{print $3}')
+            SWAP_USED=$(free -h | grep Swap | awk '{print $3}')
+            LOAD=$(uptime | awk -F'load average:' '{ print $2 }')
+            echo "📊 [$TIMESTAMP] 内存已用: $MEM_USED | Swap已用: $SWAP_USED | 负载: $LOAD"
+            sleep 60
+          done) &
           MON=$!
 
+          # 设置 ccache (加速重编)
+          export USE_CCACHE=1
+          export CCACHE_DIR="${GITHUB_WORKSPACE}/.ccache"
+          mkdir -p "$CCACHE_DIR"
+
+          # 优化编译参数防止 OOM
           export LTO=none
-          export MAKEFLAGS="-j4"
+          export MAKEFLAGS="-j$(nproc)"
+          
+          echo "  处理器核心数: $(nproc)"
           echo "  处理器代号: ${{ github.event.inputs.CPUD }}"
           echo "  配置文件: ${{ github.event.inputs.MANIFEST_XML }}"
+          
+          # 执行编译脚本
           ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} gki
           STATUS=$?
 
