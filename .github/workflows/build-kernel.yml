@@ -91,13 +91,32 @@ jobs:
 
       - name: 配置 Swap 分区
         run: |
-          echo "🔍 正在创建 Swap 文件 (12GB)..."
-          sudo fallocate -l 12G /swapfile
+          echo "🔍 正在清理残留 Docker 数据..."
+          sudo docker image prune -a -f || true
+          
+          # 获取当前可用空间 (单位: GB)
+          FREE_SPACE=$(df -BG / | tail -1 | awk '{print $4}' | sed 's/G//')
+          echo "📊 当前根目录可用空间: ${FREE_SPACE}GB"
+
+          # 根据空间动态决定 Swap 大小 (优先保留空间给源码)
+          if [ "$FREE_SPACE" -gt 25 ]; then
+            SWAP_SIZE="10G"
+          elif [ "$FREE_SPACE" -gt 15 ]; then
+            SWAP_SIZE="8G"
+          else
+            SWAP_SIZE="4G"
+          fi
+
+          echo "🔍 正在尝试创建 Swap 文件 ($SWAP_SIZE)..."
+          # 优先使用 fallocate (快)，失败则回退到 dd
+          sudo fallocate -l $SWAP_SIZE /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=4096
+          
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
           echo "✅ Swap 配置完成:"
           free -h
+          df -h /
 
       - name: 检出仓库
         uses: actions/checkout@v4
