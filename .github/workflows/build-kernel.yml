@@ -279,6 +279,8 @@ jobs:
         run: |
           cd kernel_workspace
           echo "🔨 开始编译内核..."
+          # 👇👇👇 新增这一行，禁用 LTO 优化 👇👇👇
+          export LTO=none
           echo "  处理器代号: ${{ github.event.inputs.CPUD }}"
           echo "  配置文件: ${{ github.event.inputs.MANIFEST_XML }}"
           ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} gki
