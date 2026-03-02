@@ -331,6 +331,26 @@ jobs:
       # ========================================
       # 5. 编译内核
       # ========================================
+      - name: 配置 Bazel 优化参数
+        run: |
+          cd kernel_workspace/kernel_platform
+
+          # 写入 user.bazelrc，Kleaf 构建系统会自动加载此文件
+          # 关键修复：禁用 sandbox 防止 processwrapper-sandbox 挂起
+          {
+            echo "# 使用本地执行策略，绕过 processwrapper-sandbox 挂起问题"
+            echo "build --spawn_strategy=local"
+            echo "# 限制并行任务数，防止 CI 环境资源争用"
+            echo "build --jobs=4"
+            echo "# 单个 action 超时保护"
+            echo "build --local_termination_grace_seconds=30"
+            echo "# 增加详细错误输出"
+            echo "build --verbose_failures"
+          } > user.bazelrc
+
+          echo "✅ user.bazelrc 已写入:"
+          cat user.bazelrc
+
       - name: 编译内核
         run: |
           cd kernel_workspace
