@@ -174,13 +174,17 @@ jobs:
           repo sync -c -j$(nproc) --no-tags --no-clone-bundle --optimized-fetch
           echo "::endgroup::"
 
+          # 在删除 .repo 之前，先生成 project.list 供 Bazel workspace status 脚本使用
+          echo "📋 生成 project.list（Bazel workspace status 依赖此文件）..."
+          repo list -f > project.list 2>/dev/null || repo list > project.list 2>/dev/null || echo "." > project.list
+
           # 关键优化：释放 .repo 目录占用的巨大空间 (通常 10GB+)
           echo "🗑️ 清理 .repo 目录..."
           rm -rf .repo
 
-          # 清理源码中的 .git 目录，节约磁盘空间
+          # 清理源码中的 .git 目录，节约磁盘空间（保留顶层目录结构）
           echo "🗑️ 清理源码中的 .git 目录..."
-          find . -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
+          find . -mindepth 2 -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
           echo "📊 清理后可用空间:"
           df -h /
 
