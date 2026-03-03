@@ -336,15 +336,22 @@ jobs:
           cd kernel_workspace/kernel_platform
 
           # 写入 user.bazelrc，Kleaf 构建系统会自动加载此文件
-          # 关键修复：禁用 sandbox 防止 processwrapper-sandbox 挂起
+          # Kleaf 强制要求 sandbox 执行，不能用 --spawn_strategy=local
+          # 因此通过优化 sandbox 行为来防止 processwrapper-sandbox 挂起
           {
-            echo "# 使用本地执行策略，绕过 processwrapper-sandbox 挂起问题"
-            echo "build --spawn_strategy=local"
+            echo "# === 沙箱优化：防止 processwrapper-sandbox 挂起 ==="
+            echo "# 复用沙箱目录，避免频繁创建/删除导致的 inode 耗尽和挂起"
+            echo "build --reuse_sandbox_directories"
+            echo "# 将沙箱放在内存文件系统上，大幅加速 I/O"
+            echo "build --sandbox_base=/dev/shm"
+            echo "# 禁用异步沙箱目录删除，防止清理竞态条件"
+            echo "build --experimental_sandbox_async_tree_delete_idle_threads=0"
+            echo ""
+            echo "# === 资源限制 ==="
             echo "# 限制并行任务数，防止 CI 环境资源争用"
             echo "build --jobs=4"
-            echo "# 单个 action 超时保护"
-            echo "build --local_termination_grace_seconds=30"
-            echo "# 增加详细错误输出"
+            echo ""
+            echo "# === 调试辅助 ==="
             echo "build --verbose_failures"
           } > user.bazelrc
 
