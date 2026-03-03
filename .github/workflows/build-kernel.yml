@@ -220,65 +220,38 @@ jobs:
         run: |
           cd kernel_workspace/kernel_platform
 
-          # 生成配置片段（用 echo 逐行写入，避免 heredoc 缩进导致前导空格）
-          DOCKER_CONF="docker_reqs.conf"
+          # ⚠️ 不修改 gki_defconfig！Kleaf 对 GKI defconfig 有严格一致性检查，
+          # 添加不支持的选项会导致 KernelConfig 阶段构建失败。
+          # GKI 已默认启用: NAMESPACES, NET_NS, UTS_NS, CGROUPS, CGROUP_CPUACCT,
+          # CGROUP_FREEZER, CGROUP_SCHED, CPUSETS, MEMCG, CGROUP_BPF, VETH, BRIDGE,
+          # IP_NF_NAT, NF_NAT, OVERLAY_FS, FAIR_GROUP_SCHED 等。
+          # 只在 vendor defconfig 追加额外模块级配置。
+
+          DOCKER_CONF="docker_vendor.conf"
           {
-            echo "# Docker/Container Support"
-            echo "# --- Namespaces ---"
-            echo "CONFIG_NAMESPACES=y"
-            echo "CONFIG_NET_NS=y"
-            echo "CONFIG_PID_NS=y"
-            echo "CONFIG_IPC_NS=y"
-            echo "CONFIG_UTS_NS=y"
-            echo "CONFIG_USER_NS=y"
-            echo "# --- Cgroups ---"
-            echo "CONFIG_CGROUPS=y"
-            echo "CONFIG_CGROUP_CPUACCT=y"
-            echo "CONFIG_CGROUP_DEVICE=y"
-            echo "CONFIG_CGROUP_FREEZER=y"
-            echo "CONFIG_CGROUP_SCHED=y"
-            echo "CONFIG_CPUSETS=y"
-            echo "CONFIG_MEMCG=y"
-            echo "CONFIG_CGROUP_PIDS=y"
-            echo "CONFIG_CGROUP_BPF=y"
-            echo "CONFIG_CGROUP_PERF=y"
-            echo "CONFIG_CGROUP_HUGETLB=y"
-            echo "CONFIG_NET_CLS_CGROUP=y"
-            echo "CONFIG_CFS_BANDWIDTH=y"
-            echo "CONFIG_FAIR_GROUP_SCHED=y"
-            echo "# --- Netfilter ---"
-            echo "CONFIG_VETH=y"
-            echo "CONFIG_BRIDGE=y"
+            echo "# Docker/Container Support - Vendor Configs"
             echo "CONFIG_BRIDGE_NETFILTER=y"
             echo "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y"
-            echo "CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y"
             echo "CONFIG_NETFILTER_XT_MATCH_IPVS=y"
-            echo "CONFIG_IP_NF_NAT=y"
             echo "CONFIG_IP6_NF_NAT=y"
             echo "CONFIG_IP6_NF_TARGET_MASQUERADE=y"
-            echo "CONFIG_NF_NAT=y"
             echo "CONFIG_IP_VS=y"
             echo "CONFIG_IP_VS_NFCT=y"
             echo "CONFIG_IP_VS_PROTO_TCP=y"
             echo "CONFIG_IP_VS_PROTO_UDP=y"
             echo "CONFIG_IP_VS_RR=y"
-            echo "CONFIG_IP_SCTP=y"
-            echo "# --- Filesystem & Misc ---"
-            echo "CONFIG_OVERLAY_FS=y"
-            echo "CONFIG_POSIX_MQUEUE=y"
-            echo "CONFIG_DUMMY=y"
             echo "CONFIG_MACVLAN=y"
             echo "CONFIG_IPVLAN=y"
             echo "CONFIG_VXLAN=y"
+            echo "CONFIG_DUMMY=y"
+            echo "CONFIG_POSIX_MQUEUE=y"
           } > "$DOCKER_CONF"
 
-          echo "📋 生成的配置片段（验证无前导空格）:"
-          cat -A "$DOCKER_CONF" | head -5
+          echo "📋 Vendor 配置片段:"
+          cat "$DOCKER_CONF"
 
-          # 方法1：追加到 defconfig 文件
-          echo "🔍 注入到 defconfig 文件..."
-          find common/arch/arm64/configs -type f -name "*gki_defconfig" -exec sh -c 'echo "" >> "$1"; cat docker_reqs.conf >> "$1"; echo "  ✅ 已注入: $1"' _ {} \;
-          find msm-kernel/arch/arm64/configs -type f \( -name "*pineapple*" -o -name "*sm7675*" \) -exec sh -c 'echo "" >> "$1"; cat docker_reqs.conf >> "$1"; echo "  ✅ 已注入: $1"' _ {} \;
+          echo "🔍 注入到 vendor defconfig（不动 gki_defconfig）..."
+          find msm-kernel/arch/arm64/configs -type f \( -name "*pineapple*" -o -name "*sm7675*" \) -exec sh -c 'echo "" >> "$1"; cat docker_vendor.conf >> "$1"; echo "  ✅ 已注入: $1"' _ {} \;
           echo "✅ Docker 配置注入完成"
 
       # ========================================
