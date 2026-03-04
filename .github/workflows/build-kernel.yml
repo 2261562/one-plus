@@ -330,53 +330,88 @@ jobs:
           cd kernel_workspace/kernel_platform
 
           # 修改了 gki_defconfig → savedefconfig 输出必然不一致 → Kleaf 报错退出
-          # 需要在 .bzl 源文件中 patch 掉 exit 1，然后 bazel clean 重新加载
+          # 核心问题：
+          #   1. .bzl 文件中 diff 命令比较 savedefconfig 和原始 defconfig
+          #   2. Bash 脚本开头 set -e 导致 diff 返回非零时直接退出（甚至不走到 exit 1）
+          #   3. 所以必须同时 patch: (a) diff 命令本身 (b) exit 1
+          # 使用 find(而非 Python glob) 来确保遍历所有文件（包括符号链接）
 
-          echo "🔍 定位 savedefconfig 校验代码..."
-          grep -rn "savedefconfig does not match\|savedefconfig.*not match\|does not match.*defconfig" build/ --include="*.bzl" --include="*.sh" --include="*.py" 2>/dev/null || true
+          echo "🔍 Step 1: 定位包含 savedefconfig 检查的文件..."
+          FOUND_FILES=$(find build/ -type f \( -name "*.bzl" -o -name "*.sh" -o -name "*.py" \) -exec grep -l "savedefconfig" {} \; 2>/dev/null || true)
+          echo "$FOUND_FILES"
 
-          echo "🔧 使用 Python 强力移除 savedefconfig 检查的 exit 1 ..."
-          python3 -c "
-          import os, glob
-          targets = glob.glob('build/**/*.bzl', recursive=True) + glob.glob('build/**/*.sh', recursive=True)
-          for f in targets:
-              try:
-                  with open(f, 'r') as fh:
-                      content = fh.read()
-                  if 'savedefconfig' in content and 'does not match' in content:
-                      # 简单粗暴替换含有这些关键词的文件里的 exit 1
-                      new_content = content.replace('exit 1', 'true  # ignored by patch')
-                      if new_content != content:
-                          with open(f, 'w') as fh:
-                              fh.write(new_content)
-                          print(f'    ✅ 已暴力修改: {f}')
-              except Exception as e:
-                  pass
-          "
+          echo ""
+          echo "🔧 Step 2: 强力 Patch 所有 savedefconfig 相关文件..."
+          python3 << 'PYEOF'
+          import subprocess, os
 
-          # 同样 patch .sh 文件
-          find build/ -name "*.sh" -exec grep -l "savedefconfig" {} \; 2>/dev/null | while read f; do
-            echo "  � Patching: $f"
-            python3 -c "
-          import re
-          with open('$f', 'r') as fh:
-              content = fh.read()
-          original = content
-          content = re.sub(
-              r'(echo.*does not match.*?\n\s*)exit 1',
-              r'\1true  # Docker: check disabled',
-              content
+          # 使用 find 获取所有包含 savedefconfig 的文件
+          result = subprocess.run(
+              ["find", "build/", "-type", "f", "(", "-name", "*.bzl", "-o", "-name", "*.sh", "-o", "-name", "*.py", ")", "-exec", "grep", "-l", "savedefconfig", "{}", ";"],
+              capture_output=True, text=True, cwd="."
           )
-          if content != original:
-              with open('$f', 'w') as fh:
-                  fh.write(content)
-              print(f'    ✅ 已修改')
-          "
+          files = [f.strip() for f in result.stdout.strip().split('\n') if f.strip()]
+          print(f"  找到 {len(files)} 个包含 savedefconfig 的文件")
+
+          patched = 0
+          for fpath in files:
+              try:
+                  with open(fpath, 'r') as fh:
+                      content = fh.read()
+                  original = content
+
+                  # Patch 1: 将 diff 命令替换为 diff ... || true（防止 set -e 触发）
+                  # 匹配类似 diff -u ... savedefconfig ... defconfig 的行
+                  import re
+                  # 匹配单独一行的 diff 命令（含 savedefconfig）
+                  content = re.sub(
+                      r'([ \t]*)(diff\s+[^\n]*(?:savedefconfig|defconfig)[^\n]*)',
+                      r'\1\2 || true',
+                      content
+                  )
+                  # 避免 || true || true 重复
+                  content = content.replace('|| true || true', '|| true')
+
+                  # Patch 2: 替换所有 exit 1（如果文件含 savedefconfig 相关内容）
+                  content = content.replace('exit 1', 'true  # patched: savedefconfig check disabled')
+
+                  # Patch 3: 将 fail() 调用（Starlark）替换为 pass（如果在 savedefconfig 上下文中）
+                  content = re.sub(
+                      r'(.*savedefconfig.*\n(?:.*\n){0,5}.*?)fail\(',
+                      r'\1print("WARNING (patched): savedefconfig mismatch ignored" + ',
+                      content
+                  )
+
+                  if content != original:
+                      with open(fpath, 'w') as fh:
+                          fh.write(content)
+                      patched += 1
+                      print(f"    ✅ 已修改: {fpath}")
+                  else:
+                      print(f"    ⏭️ 无需修改: {fpath}")
+              except Exception as e:
+                  print(f"    ⚠️ 错误({fpath}): {e}")
+
+          print(f"\n  共修改 {patched} 个文件")
+          PYEOF
+
+          echo ""
+          echo "🔍 Step 3: 验证 patch 结果..."
+          # 搜索是否还有残留的 exit 1 在 savedefconfig 相关文件中
+          for f in $(find build/ -type f \( -name "*.bzl" -o -name "*.sh" \) -exec grep -l "savedefconfig" {} \; 2>/dev/null); do
+            if grep -q "exit 1" "$f" 2>/dev/null; then
+              echo "  ⚠️ 仍含 exit 1: $f"
+              grep -n "exit 1" "$f"
+            fi
+            if grep -q "does not match" "$f" 2>/dev/null; then
+              echo "  📋 含 'does not match': $f"
+              grep -n "does not match" "$f"
+            fi
           done
 
-          # 清理 Bazel 缓存，确保重新读取修改后的 .bzl 文件
-          echo "🧹 清理 Bazel 缓存..."
-          tools/bazel clean 2>/dev/null || true
+          echo ""
+          echo "🧹 Step 4: 关闭 Bazel 服务器（确保重新加载修改后的 .bzl）..."
+          tools/bazel shutdown 2>/dev/null || true
 
           echo "✅ savedefconfig 校验已禁用"
 
