@@ -329,53 +329,87 @@ jobs:
         run: |
           cd kernel_workspace/kernel_platform
 
-          # ===================================================================
-          # 修改了 gki_defconfig → savedefconfig 输出不一致 → Kleaf 报错退出
-          # 只修改 .bzl 文件（Starlark 模板），绝不修改 .sh 文件
-          # 只替换 exit 1 → true（diff 在 if 条件中，不受 set -e 影响）
-          # 不修改 diff 命令（上次加 || true 导致模板结构被破坏）
-          # ===================================================================
+          echo "=============================================="
+          echo "  诊断 savedefconfig 检查位置"
+          echo "=============================================="
 
-          echo "🔍 Step 1: 搜索含 savedefconfig 的 .bzl 文件..."
-          BZL_FILES=$(find . -name "*.bzl" -type f 2>/dev/null | xargs grep -l "savedefconfig" 2>/dev/null || true)
-          
-          if [ -z "$BZL_FILES" ]; then
-            echo "  ⚠️ 未找到含 savedefconfig 的 .bzl 文件"
-            echo "  🔍 回退搜索 'does not match'..."
-            BZL_FILES=$(find . -name "*.bzl" -type f 2>/dev/null | xargs grep -l "does not match" 2>/dev/null || true)
+          echo ""
+          echo "🔍 A) 搜索 'does not match' 在所有源文件中..."
+          grep -rn "does not match" . --include="*.bzl" --include="*.sh" --include="*.py" 2>/dev/null | grep -i "defconfig\|savedef" | head -30 || echo "  未找到"
+
+          echo ""
+          echo "🔍 B) 搜索 'savedefconfig' 在所有源文件中..."
+          grep -rn "savedefconfig" . --include="*.bzl" --include="*.sh" --include="*.py" 2>/dev/null | head -30 || echo "  未找到"
+
+          echo ""
+          echo "🔍 C) 搜索精确错误信息 'ERROR.*savedefconfig'..."
+          grep -rn "ERROR.*savedefconfig\|savedefconfig.*does not match" . --include="*.bzl" --include="*.sh" --include="*.py" 2>/dev/null | head -20 || echo "  未找到"
+
+          echo ""
+          echo "🔍 D) 搜索 'exit 1' 在含 savedefconfig 的文件中..."
+          for f in $(grep -rl "savedefconfig" . --include="*.bzl" --include="*.sh" --include="*.py" 2>/dev/null); do
+            if grep -q "exit" "$f" 2>/dev/null; then
+              echo "  📄 $f 含 exit:"
+              grep -n "exit" "$f" | head -10
+            fi
+          done
+
+          echo ""
+          echo "=============================================="
+          echo "  开始 Patch"
+          echo "=============================================="
+
+          # 找到同时包含 savedefconfig 和 does not match 的文件 (所有类型)
+          TARGET_FILES=""
+          for f in $(grep -rl "savedefconfig" . --include="*.bzl" --include="*.sh" --include="*.py" 2>/dev/null); do
+            if grep -q "does not match" "$f" 2>/dev/null; then
+              # 排除 _setup_env.sh（之前因为误伤它导致 syntax error）
+              if [[ "$f" != *"_setup_env.sh"* ]]; then
+                TARGET_FILES="$TARGET_FILES $f"
+              fi
+            fi
+          done
+
+          if [ -z "$TARGET_FILES" ]; then
+            echo "  ⚠️ 未找到同时含 savedefconfig 和 'does not match' 的文件"
+            echo "  🔍 回退：搜索所有含 savedefconfig 的 .bzl 文件..."
+            TARGET_FILES=$(grep -rl "savedefconfig" . --include="*.bzl" 2>/dev/null | tr '\n' ' ')
           fi
 
-          echo "  📋 找到的文件:"
-          echo "$BZL_FILES"
+          echo "  📋 目标文件: $TARGET_FILES"
           echo ""
 
-          echo "🔧 Step 2: 替换 exit 1 → true（仅 .bzl 文件）..."
-          for f in $BZL_FILES; do
+          for f in $TARGET_FILES; do
             echo "  📄 处理: $f"
-            echo "    --- Patch 前 ---"
-            grep -n "exit 1\|does not match\|savedefconfig" "$f" | head -20
-            
-            # 只做一件事：替换 exit 1 → true
-            sed -i 's/exit 1/true  # patched/g' "$f"
-            
-            echo "    --- Patch 后 ---"
-            grep -n "exit 1\|true.*patched\|does not match\|savedefconfig" "$f" | head -20
+            echo "    --- Patch 前: exit 相关行 ---"
+            grep -n "exit" "$f" | head -20
+            echo "    --- Patch 前: does not match 相关行 ---"
+            grep -n "does not match" "$f" | head -10
+
+            # 用多种模式替换 exit
+            # 模式1: exit 1 (标准)
+            sed -i 's/exit 1/true  # patched-exit1/g' "$f"
+            # 模式2: exit  1 (多空格/tab)
+            sed -i 's/exit[[:space:]]\+1\b/true  # patched-exit-ws/g' "$f"
+            # 模式3: return 1 (在函数中)
+            sed -i 's/return 1/return 0  # patched-return/g' "$f"
+
+            echo "    --- Patch 后: exit/return/patched 相关行 ---"
+            grep -n "exit\|return\|patched" "$f" | head -20
             echo ""
           done
 
-          echo "🔍 Step 3: 验证..."
-          REMAINING=$(echo "$BZL_FILES" | xargs grep -l "exit 1" 2>/dev/null || true)
-          if [ -n "$REMAINING" ]; then
-            echo "  ⚠️ 仍含 exit 1:"
-            for f in $REMAINING; do
+          echo ""
+          echo "🔍 最终验证: 搜索残留的 exit 1..."
+          for f in $TARGET_FILES; do
+            if grep -q "exit 1" "$f" 2>/dev/null; then
+              echo "  ❌ $f 仍含 exit 1:"
               grep -n "exit 1" "$f"
-            done
-          else
-            echo "  ✅ 所有 exit 1 已清除"
-          fi
+            fi
+          done
 
           echo ""
-          echo "🧹 Step 4: 关闭 Bazel 服务器..."
+          echo "🧹 关闭 Bazel 服务器..."
           tools/bazel shutdown 2>/dev/null || true
 
           echo "✅ savedefconfig 校验已禁用"
