@@ -189,7 +189,7 @@ jobs:
           rm -f common/android/abi_gki_protected_exports_* || true
           rm -f msm-kernel/android/abi_gki_protected_exports_* || true
 
-          echo "🧹 禁用 KMI 严格模式（修改值而非删除行，避免破坏 BUILD.bazel 语法）..."
+          echo "🧹 禁用 KMI 严格模式..."
           python3 << 'PYEOF'
           import re
 
@@ -199,7 +199,7 @@ jobs:
 
           original = content
 
-          # 只修改值: True → False，不删除任何行
+          # 只修改值: True → False
           content = re.sub(
               r'(kmi_symbol_list_strict_mode\s*=\s*)True',
               r'\1False',
@@ -212,15 +212,24 @@ jobs:
               print("  ✅ kmi_symbol_list_strict_mode: True → False")
           else:
               print("  ⚠️ 未找到 kmi_symbol_list_strict_mode = True")
-              # 打印所有 kmi 相关行帮助诊断
               for i, line in enumerate(content.split('\n'), 1):
                   if 'kmi_symbol_list' in line:
                       print(f"    行 {i}: {line.strip()}")
           PYEOF
 
-          # 同时清空 ABI 符号列表源文件（双保险）
-          find common/android -name "abi_gki_aarch64*" -type f -exec truncate -s 0 {} \; 2>/dev/null || true
-          find common -path "*/android/abi_*" -type f -exec truncate -s 0 {} \; 2>/dev/null || true
+          echo "🧹 从符号列表中删除缺失的 kasan_flag_enabled..."
+          # 精准修复：只删除导致 abi_verify_ksymtab 失败的符号
+          find . -name "abi_*" -type f -exec grep -l "kasan_flag_enabled" {} \; 2>/dev/null | while read f; do
+            echo "  📄 从 $f 中移除 kasan_flag_enabled"
+            sed -i '/kasan_flag_enabled/d' "$f"
+          done
+
+          echo "🧹 清空 ABI 符号列表源文件（common + msm-kernel）..."
+          # 之前只清了 common/，遗漏 msm-kernel/（构建用了 --user_kmi_symbol_lists=//msm-kernel:...）
+          find common -path "*/android/abi_*" -type f ! -name "abi_gki_protected_exports_*" -exec truncate -s 0 {} \; 2>/dev/null || true
+          find msm-kernel -path "*/android/abi_*" -type f ! -name "abi_gki_protected_exports_*" -exec truncate -s 0 {} \; 2>/dev/null || true
+          echo "  已清空的文件:"
+          find common msm-kernel -path "*/android/abi_*" -type f -size 0 2>/dev/null | head -15
 
           echo "✅ ABI/KMI 已处理"
 
