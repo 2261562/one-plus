@@ -448,12 +448,19 @@ jobs:
       - name: 配置 Bazel 优化参数
         run: |
           cd kernel_workspace/kernel_platform
-          {
-            echo "build --reuse_sandbox_directories"
-            echo "build --experimental_sandbox_async_tree_delete_idle_threads=0"
-            echo "build --jobs=4"
-            echo "build --verbose_failures"
-          } > user.bazelrc
+          cat <<EOF > user.bazelrc
+          # 限制 Bazel 系统的 JVM 内存，避免 OOM
+          startup --host_jvm_args=-Xmx3g
+          # 降低并发度，限制内存使用
+          build --jobs=2
+          build --local_ram_resources=6144
+          build --local_cpu_resources=2
+          build --worker_max_instances=1
+          # 保留之前的优化
+          build --reuse_sandbox_directories
+          build --experimental_sandbox_async_tree_delete_idle_threads=0
+          build --verbose_failures
+          EOF
 
           echo "📋 user.bazelrc 内容:"
           cat user.bazelrc
