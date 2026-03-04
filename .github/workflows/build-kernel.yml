@@ -229,6 +229,30 @@ jobs:
           # 只需要：1) 删除 protected_exports  2) 禁用 strict_mode  3) 删除特定问题符号
           echo "✅ 符号列表文件保持不变（仅清理了 protected_exports 和 kasan_flag_enabled）"
 
+          echo "🔧 创建 kasan_flag_enabled 符号 stub..."
+          # vendor 模块引用 kasan_flag_enabled 作为实际符号，
+          # 但未启用 CONFIG_KASAN 时它只是个宏 (#define kasan_flag_enabled false)
+          # 需要提供一个实际的导出符号
+          cat > common/lib/kasan_stub.c << 'CEOF'
+          #include <linux/module.h>
+          #include <linux/types.h>
+          #ifndef CONFIG_KASAN
+          bool kasan_flag_enabled = false;
+          EXPORT_SYMBOL(kasan_flag_enabled);
+          #endif
+          CEOF
+          # 去掉 heredoc 产生的前导空格
+          sed -i 's/^          //' common/lib/kasan_stub.c
+
+          # 追加到 lib/Makefile
+          if ! grep -q "kasan_stub" common/lib/Makefile; then
+            echo "obj-y += kasan_stub.o" >> common/lib/Makefile
+            echo "  ✅ 已添加 kasan_stub.o 到 common/lib/Makefile"
+          fi
+
+          echo "📋 kasan_stub.c 内容:"
+          cat common/lib/kasan_stub.c
+
           echo "✅ ABI/KMI 已处理"
 
       - name: 移除 -dirty 后缀
