@@ -219,37 +219,53 @@ jobs:
 
           # ============================================================
           # 修复 kasan_flag_enabled 符号问题
-          # 核心原理：GKI 构建中 CONFIG_TRIM_UNUSED_KSYMS=y，
-          # 内核只导出 KMI 符号列表中列出的符号。
-          # 必须同时满足两个条件才能让 vendor 模块找到该符号：
-          #   1) 符号在 KMI 列表中（防止被 TRIM_UNUSED_KSYMS 裁剪）
-          #   2) stub 提供真实的符号定义和 EXPORT_SYMBOL
+          # 
+          # 背景：vendor 模块引用 kasan_flag_enabled 作为真实符号，但
+          # 未启用 CONFIG_KASAN 时 kasan.h 定义 #define kasan_flag_enabled false
+          # 导致内核不会导出该符号，modpost 报 undefined。
+          #
+          # 方案（三管齐下）:
+          #   1) 从 protected_exports 中删除（避免 abi_verify 失败）
+          #   2) BUILD.bazel 中 trim_nonlisted_kmi = False（防止 TRIM 裁剪）
+          #   3) kasan_stub.c 提供真实符号定义 + EXPORT_SYMBOL
+          #
+          # ⚠️ 不能修改 abi_gki_aarch64* 符号列表文件！
+          # 这些文件是 configparser INI 格式，随意追加会导致
+          # abi_flatten_symbol_list.py 解析崩溃（AttributeError）
           # ============================================================
 
-          echo "🔧 确保 kasan_flag_enabled 在 KMI 符号列表中..."
-          # 只从 protected_exports 中删除（这些文件会导致 abi_verify 失败）
+          echo "🔧 清理 protected_exports 中的 kasan_flag_enabled..."
           find . -name "abi_gki_protected_exports*" -type f -exec grep -l "kasan_flag_enabled" {} \; 2>/dev/null | while read f; do
-            echo "  📄 从 protected_exports $f 中移除 kasan_flag_enabled"
+            echo "  📄 从 $f 中移除 kasan_flag_enabled"
             sed -i '/kasan_flag_enabled/d' "$f"
           done
 
-          # 在 KMI 符号列表中添加 kasan_flag_enabled（如果不存在）
-          # 这些 abi_gki_aarch64* 文件是 TRIM_UNUSED_KSYMS 的白名单
-          for abi_file in $(find . -name "abi_gki_aarch64*" -not -name "*protected*" -type f 2>/dev/null); do
-            if [ -f "$abi_file" ] && [ -s "$abi_file" ]; then
-              if ! grep -q "kasan_flag_enabled" "$abi_file"; then
-                echo "  kasan_flag_enabled" >> "$abi_file"
-                echo "  ✅ 已添加 kasan_flag_enabled 到 $abi_file"
-              else
-                echo "  ✓ kasan_flag_enabled 已存在于 $abi_file"
-              fi
-            fi
-          done
+          echo "🔧 禁用 trim_nonlisted_kmi（防止非 KMI 符号被裁剪）..."
+          python3 << 'PYEOF2'
+          import re
+
+          for bzl_file in ["common/BUILD.bazel", "msm-kernel/BUILD.bazel"]:
+              try:
+                  with open(bzl_file) as fh:
+                      content = fh.read()
+                  original = content
+                  # trim_nonlisted_kmi = True → False
+                  content = re.sub(
+                      r'(trim_nonlisted_kmi\s*=\s*)True',
+                      r'\1False',
+                      content
+                  )
+                  if content != original:
+                      with open(bzl_file, 'w') as fh:
+                          fh.write(content)
+                      print(f"  ✅ {bzl_file}: trim_nonlisted_kmi True → False")
+                  else:
+                      print(f"  ℹ️ {bzl_file}: 未找到 trim_nonlisted_kmi = True")
+              except FileNotFoundError:
+                  print(f"  ⚠️ {bzl_file} 不存在，跳过")
+          PYEOF2
 
           echo "🔧 创建 kasan_flag_enabled 符号 stub..."
-          # vendor 模块引用 kasan_flag_enabled 作为真实符号，
-          # 但未启用 CONFIG_KASAN 时 kasan.h 中 #define kasan_flag_enabled false
-          # 必须 #undef 后才能定义真实变量，否则预处理器会展开成 bool false = false;
           cat > common/lib/kasan_stub.c << 'CEOF'
           // SPDX-License-Identifier: GPL-2.0
           // kasan_flag_enabled 符号 stub
