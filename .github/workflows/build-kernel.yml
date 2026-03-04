@@ -324,95 +324,77 @@ jobs:
 
           echo "✅ Docker 配置注入完成（GKI sed 替换 + vendor 追加）"
 
-      - name: 禁用 Kleaf savedefconfig 校验
+      - name: 规范化 gki_defconfig（让 savedefconfig 检查自然通过）
         if: github.event.inputs.ENABLE_DOCKER == 'true'
         run: |
           cd kernel_workspace/kernel_platform
 
-          echo "=============================================="
-          echo "  诊断 savedefconfig 检查位置"
-          echo "=============================================="
+          # ===================================================================
+          # 全新思路：不再尝试 patch .bzl 文件（已失败 5 次）
+          # 而是用 make savedefconfig 规范化 defconfig 文件
+          # 原理：
+          #   1. make defconfig  → 从 gki_defconfig 生成完整的 .config
+          #   2. make savedefconfig → 从 .config 生成最小化的 defconfig
+          #   3. 用 savedefconfig 输出替换原始 gki_defconfig
+          #   4. Kleaf 再跑一遍同样的流程，diff 结果一致 → 检查通过
+          # ===================================================================
 
-          echo ""
-          echo "🔍 A) 搜索 'does not match' 在所有源文件中..."
-          grep -rn "does not match" . --include="*.bzl" --include="*.sh" --include="*.py" 2>/dev/null | grep -i "defconfig\|savedef" | head -30 || echo "  未找到"
+          GKI_DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
+          KDIR="common"
+          OUT="/tmp/defconfig_normalize"
+          
+          echo "📍 原始 defconfig 行数: $(wc -l < $GKI_DEFCONFIG)"
 
-          echo ""
-          echo "🔍 B) 搜索 'savedefconfig' 在所有源文件中..."
-          grep -rn "savedefconfig" . --include="*.bzl" --include="*.sh" --include="*.py" 2>/dev/null | head -30 || echo "  未找到"
-
-          echo ""
-          echo "🔍 C) 搜索精确错误信息 'ERROR.*savedefconfig'..."
-          grep -rn "ERROR.*savedefconfig\|savedefconfig.*does not match" . --include="*.bzl" --include="*.sh" --include="*.py" 2>/dev/null | head -20 || echo "  未找到"
-
-          echo ""
-          echo "🔍 D) 搜索 'exit 1' 在含 savedefconfig 的文件中..."
-          for f in $(grep -rl "savedefconfig" . --include="*.bzl" --include="*.sh" --include="*.py" 2>/dev/null); do
-            if grep -q "exit" "$f" 2>/dev/null; then
-              echo "  📄 $f 含 exit:"
-              grep -n "exit" "$f" | head -10
-            fi
-          done
-
-          echo ""
-          echo "=============================================="
-          echo "  开始 Patch"
-          echo "=============================================="
-
-          # 找到同时包含 savedefconfig 和 does not match 的文件 (所有类型)
-          TARGET_FILES=""
-          for f in $(grep -rl "savedefconfig" . --include="*.bzl" --include="*.sh" --include="*.py" 2>/dev/null); do
-            if grep -q "does not match" "$f" 2>/dev/null; then
-              # 排除 _setup_env.sh（之前因为误伤它导致 syntax error）
-              if [[ "$f" != *"_setup_env.sh"* ]]; then
-                TARGET_FILES="$TARGET_FILES $f"
-              fi
-            fi
-          done
-
-          if [ -z "$TARGET_FILES" ]; then
-            echo "  ⚠️ 未找到同时含 savedefconfig 和 'does not match' 的文件"
-            echo "  🔍 回退：搜索所有含 savedefconfig 的 .bzl 文件..."
-            TARGET_FILES=$(grep -rl "savedefconfig" . --include="*.bzl" 2>/dev/null | tr '\n' ' ')
+          # 使用内核源码自带的预编译 clang 工具链
+          CLANG_BIN=$(find prebuilts/clang/host/linux-x86 -maxdepth 2 -name "clang" -type f 2>/dev/null | head -1)
+          if [ -n "$CLANG_BIN" ]; then
+            CLANG_DIR=$(dirname "$CLANG_BIN")
+            export PATH="$CLANG_DIR:$PATH"
+            echo "🔧 使用工具链: $CLANG_DIR"
           fi
 
-          echo "  📋 目标文件: $TARGET_FILES"
-          echo ""
+          mkdir -p "$OUT"
 
-          for f in $TARGET_FILES; do
-            echo "  📄 处理: $f"
-            echo "    --- Patch 前: exit 相关行 ---"
-            grep -n "exit" "$f" | head -20
-            echo "    --- Patch 前: does not match 相关行 ---"
-            grep -n "does not match" "$f" | head -10
+          echo "🔧 Step 1: make defconfig..."
+          make -C "$KDIR" ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CC=clang HOSTCC=clang \
+            O="$OUT" \
+            gki_defconfig 2>&1 | tail -5
 
-            # 用多种模式替换 exit
-            # 模式1: exit 1 (标准)
-            sed -i 's/exit 1/true  # patched-exit1/g' "$f"
-            # 模式2: exit  1 (多空格/tab)
-            sed -i 's/exit[[:space:]]\+1\b/true  # patched-exit-ws/g' "$f"
-            # 模式3: return 1 (在函数中)
-            sed -i 's/return 1/return 0  # patched-return/g' "$f"
+          echo "🔧 Step 2: make savedefconfig..."
+          make -C "$KDIR" ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CC=clang HOSTCC=clang \
+            O="$OUT" \
+            savedefconfig 2>&1 | tail -5
 
-            echo "    --- Patch 后: exit/return/patched 相关行 ---"
-            grep -n "exit\|return\|patched" "$f" | head -20
-            echo ""
-          done
-
-          echo ""
-          echo "🔍 最终验证: 搜索残留的 exit 1..."
-          for f in $TARGET_FILES; do
-            if grep -q "exit 1" "$f" 2>/dev/null; then
-              echo "  ❌ $f 仍含 exit 1:"
-              grep -n "exit 1" "$f"
+          if [ -f "$OUT/defconfig" ]; then
+            echo "✅ savedefconfig 生成成功"
+            echo "📍 规范化后行数: $(wc -l < $OUT/defconfig)"
+            
+            # 对比差异
+            echo "📋 规范化前后差异（前10行）:"
+            diff "$GKI_DEFCONFIG" "$OUT/defconfig" | head -30 || true
+            
+            # 用规范化后的 defconfig 替换原始文件
+            cp "$OUT/defconfig" "$GKI_DEFCONFIG"
+            echo "✅ gki_defconfig 已替换为规范化版本"
+          else
+            echo "⚠️ savedefconfig 未生成，尝试备用方案..."
+            # 备用方案: 直接使用非交叉编译方式
+            make -C "$KDIR" ARCH=arm64 O="$OUT" gki_defconfig 2>&1 | tail -3 || true
+            make -C "$KDIR" ARCH=arm64 O="$OUT" savedefconfig 2>&1 | tail -3 || true
+            if [ -f "$OUT/defconfig" ]; then
+              cp "$OUT/defconfig" "$GKI_DEFCONFIG"
+              echo "✅ 备用方案成功"
+            else
+              echo "❌ 无法规范化 defconfig，构建可能失败"
             fi
-          done
+          fi
 
-          echo ""
-          echo "🧹 关闭 Bazel 服务器..."
-          tools/bazel shutdown 2>/dev/null || true
-
-          echo "✅ savedefconfig 校验已禁用"
+          rm -rf "$OUT"
+          echo "✅ defconfig 规范化完成"
 
       # ========================================
       # 5. 编译内核
