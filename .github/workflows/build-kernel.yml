@@ -224,12 +224,10 @@ jobs:
             sed -i '/kasan_flag_enabled/d' "$f"
           done
 
-          echo "🧹 清空 ABI 符号列表源文件（common + msm-kernel）..."
-          # 之前只清了 common/，遗漏 msm-kernel/（构建用了 --user_kmi_symbol_lists=//msm-kernel:...）
-          find common -path "*/android/abi_*" -type f ! -name "abi_gki_protected_exports_*" -exec truncate -s 0 {} \; 2>/dev/null || true
-          find msm-kernel -path "*/android/abi_*" -type f ! -name "abi_gki_protected_exports_*" -exec truncate -s 0 {} \; 2>/dev/null || true
-          echo "  已清空的文件:"
-          find common msm-kernel -path "*/android/abi_*" -type f -size 0 2>/dev/null | head -15
+          # ⚠️ 不能清空 abi_gki_aarch64 等符号列表文件！
+          # Kleaf 用它们作为 TRIM_UNUSED_KSYMS 白名单，清空 → 所有符号被裁剪 → 5566 modpost 错误
+          # 只需要：1) 删除 protected_exports  2) 禁用 strict_mode  3) 删除特定问题符号
+          echo "✅ 符号列表文件保持不变（仅清理了 protected_exports 和 kasan_flag_enabled）"
 
           echo "✅ ABI/KMI 已处理"
 
