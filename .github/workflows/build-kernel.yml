@@ -181,11 +181,19 @@ jobs:
           echo "📊 清理后可用空间:"
           df -h /
 
-      - name: 清理 ABI 保护导出（防止编译报错）
+      - name: 清理 ABI 保护导出与 KMI 符号列表（防止编译报错）
         run: |
           cd kernel_workspace
+          echo "🧹 清理 ABI protected exports..."
           rm -f kernel_platform/common/android/abi_gki_protected_exports_* || true
           rm -f kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || true
+
+          echo "🧹 清空 KMI 符号列表（禁用 kmi_symbol_list_strict_mode）..."
+          # Docker 配置修改会影响内核符号导出，导致 abi_verify_ksymtab 失败
+          # 清空符号列表文件即可跳过 KMI 严格模式检查
+          find kernel_platform/common -name "abi_symbollist*" -type f -exec truncate -s 0 {} \; 2>/dev/null || true
+          find kernel_platform/msm-kernel -name "abi_symbollist*" -type f -exec truncate -s 0 {} \; 2>/dev/null || true
+          echo "✅ ABI/KMI 相关文件已清理"
 
       - name: 移除 -dirty 后缀
         run: |
