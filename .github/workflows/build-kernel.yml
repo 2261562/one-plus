@@ -324,6 +324,79 @@ jobs:
 
           echo "✅ Docker 配置注入完成（GKI sed 替换 + vendor 追加）"
 
+      - name: 禁用 Kleaf savedefconfig 校验
+        if: github.event.inputs.ENABLE_DOCKER == 'true'
+        run: |
+          cd kernel_workspace/kernel_platform
+
+          # 修改了 gki_defconfig → savedefconfig 输出必然不一致 → Kleaf 报错退出
+          # 需要在 .bzl 源文件中 patch 掉 exit 1，然后 bazel clean 重新加载
+
+          echo "🔍 定位 savedefconfig 校验代码..."
+          grep -rn "savedefconfig does not match\|savedefconfig.*not match\|does not match.*defconfig" build/ --include="*.bzl" --include="*.sh" --include="*.py" 2>/dev/null || true
+
+          echo "🔧 使用 Python 精准 patch .bzl 文件中的 savedefconfig 检查..."
+          find build/ -name "*.bzl" -exec grep -l "savedefconfig" {} \; 2>/dev/null | while read f; do
+            echo "  📄 Patching: $f"
+            python3 -c "
+          import re
+          with open('$f', 'r') as fh:
+              content = fh.read()
+          original = content
+          # 模式1: 'exit 1' 紧跟在 'savedefconfig does not match' 之后（可能跨行）
+          content = re.sub(
+              r'(echo.*(?:ERROR|savedefconfig).*does not match.*?\n\s*)exit 1',
+              r'\1true  # Docker: savedefconfig check disabled',
+              content
+          )
+          # 模式2: 'exit 1' 在 savedefconfig diff 检查块中
+          content = re.sub(
+              r'(diff.*savedefconfig.*\n(?:.*\n)*?\s*)exit 1',
+              r'\1true  # Docker: savedefconfig check disabled',
+              content
+          )
+          # 模式3: 直接替换字符串模板中的 exit 1（在 savedefconfig 上下文中）
+          content = re.sub(
+              r'savedefconfig does not match.*?exit 1',
+              'savedefconfig differs (ignored by Docker patch)\"\\n    true',
+              content,
+              flags=re.DOTALL
+          )
+          if content != original:
+              with open('$f', 'w') as fh:
+                  fh.write(content)
+              print(f'    ✅ 已修改')
+          else:
+              print(f'    ⏭️ 未匹配到 exit 1 模式')
+          "
+          done
+
+          # 同样 patch .sh 文件
+          find build/ -name "*.sh" -exec grep -l "savedefconfig" {} \; 2>/dev/null | while read f; do
+            echo "  � Patching: $f"
+            python3 -c "
+          import re
+          with open('$f', 'r') as fh:
+              content = fh.read()
+          original = content
+          content = re.sub(
+              r'(echo.*does not match.*?\n\s*)exit 1',
+              r'\1true  # Docker: check disabled',
+              content
+          )
+          if content != original:
+              with open('$f', 'w') as fh:
+                  fh.write(content)
+              print(f'    ✅ 已修改')
+          "
+          done
+
+          # 清理 Bazel 缓存，确保重新读取修改后的 .bzl 文件
+          echo "🧹 清理 Bazel 缓存..."
+          tools/bazel clean 2>/dev/null || true
+
+          echo "✅ savedefconfig 校验已禁用"
+
       # ========================================
       # 5. 编译内核
       # ========================================
@@ -336,13 +409,6 @@ jobs:
             echo "build --jobs=4"
             echo "build --verbose_failures"
           } > user.bazelrc
-
-          # 如果启用了 Docker，需要禁用 Kleaf 的 savedefconfig 一致性校验
-          # 因为我们修改了 gki_defconfig，savedefconfig 输出会与修改后的 defconfig 不一致
-          if [ "${{ github.event.inputs.ENABLE_DOCKER }}" = "true" ]; then
-            echo "🐳 添加 Kleaf defconfig 校验跳过 flag..."
-            echo "build --//build/kernel/kleaf:fail_action_on_defconfig_fragment=false" >> user.bazelrc
-          fi
 
           echo "📋 user.bazelrc 内容:"
           cat user.bazelrc
