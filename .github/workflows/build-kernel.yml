@@ -189,22 +189,40 @@ jobs:
           rm -f common/android/abi_gki_protected_exports_* || true
           rm -f msm-kernel/android/abi_gki_protected_exports_* || true
 
-          echo "🧹 禁用 KMI 检查（从 BUILD.bazel 中删除 kmi_symbol_list 相关行）..."
-          echo "  --- 修改前: kmi 相关行 ---"
-          grep -n "kmi_symbol_list" common/BUILD.bazel | head -10 || echo "  (未找到)"
+          echo "🧹 禁用 KMI 严格模式（修改值而非删除行，避免破坏 BUILD.bazel 语法）..."
+          python3 << 'PYEOF'
+          import re
 
-          # 核心操作：删除 BUILD.bazel 中所有含 kmi_symbol_list 的行
-          # 没有 kmi_symbol_list 属性 → Kleaf 不会生成 KMI 检查动作
-          sed -i '/kmi_symbol_list/d' common/BUILD.bazel
+          f = "common/BUILD.bazel"
+          with open(f) as fh:
+              content = fh.read()
 
-          echo "  --- 修改后: kmi 相关行 ---"
-          grep -n "kmi_symbol_list" common/BUILD.bazel | head -10 || echo "  (已全部删除 ✅)"
+          original = content
+
+          # 只修改值: True → False，不删除任何行
+          content = re.sub(
+              r'(kmi_symbol_list_strict_mode\s*=\s*)True',
+              r'\1False',
+              content
+          )
+
+          if content != original:
+              with open(f, 'w') as fh:
+                  fh.write(content)
+              print("  ✅ kmi_symbol_list_strict_mode: True → False")
+          else:
+              print("  ⚠️ 未找到 kmi_symbol_list_strict_mode = True")
+              # 打印所有 kmi 相关行帮助诊断
+              for i, line in enumerate(content.split('\n'), 1):
+                  if 'kmi_symbol_list' in line:
+                      print(f"    行 {i}: {line.strip()}")
+          PYEOF
 
           # 同时清空 ABI 符号列表源文件（双保险）
           find common/android -name "abi_gki_aarch64*" -type f -exec truncate -s 0 {} \; 2>/dev/null || true
           find common -path "*/android/abi_*" -type f -exec truncate -s 0 {} \; 2>/dev/null || true
 
-          echo "✅ ABI/KMI 已禁用"
+          echo "✅ ABI/KMI 已处理"
 
       - name: 移除 -dirty 后缀
         run: |
