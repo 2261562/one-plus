@@ -231,13 +231,14 @@ jobs:
 
           echo "🔧 创建 kasan_flag_enabled 符号 stub..."
           # vendor 模块引用 kasan_flag_enabled 作为实际符号，
-          # 但未启用 CONFIG_KASAN 时它只是个宏 (#define kasan_flag_enabled false)
-          # 需要提供一个实际的导出符号
+          # 但未启用 CONFIG_KASAN 时 kasan.h 定义了 #define kasan_flag_enabled false
+          # 必须 #undef 后才能定义真实符号，否则预处理变成 bool false = false;
           cat > common/lib/kasan_stub.c << 'CEOF'
-          #include <linux/module.h>
-          #include <linux/types.h>
+          #include <linux/export.h>
           #ifndef CONFIG_KASAN
-          bool kasan_flag_enabled = false;
+          /* kasan.h 中 #define kasan_flag_enabled false，必须先 undef */
+          #undef kasan_flag_enabled
+          _Bool kasan_flag_enabled;
           EXPORT_SYMBOL(kasan_flag_enabled);
           #endif
           CEOF
