@@ -217,29 +217,51 @@ jobs:
                       print(f"    行 {i}: {line.strip()}")
           PYEOF
 
-          echo "🧹 从符号列表中删除缺失的 kasan_flag_enabled..."
-          # 精准修复：只删除导致 abi_verify_ksymtab 失败的符号
-          find . -name "abi_*" -type f -exec grep -l "kasan_flag_enabled" {} \; 2>/dev/null | while read f; do
-            echo "  📄 从 $f 中移除 kasan_flag_enabled"
+          # ============================================================
+          # 修复 kasan_flag_enabled 符号问题
+          # 核心原理：GKI 构建中 CONFIG_TRIM_UNUSED_KSYMS=y，
+          # 内核只导出 KMI 符号列表中列出的符号。
+          # 必须同时满足两个条件才能让 vendor 模块找到该符号：
+          #   1) 符号在 KMI 列表中（防止被 TRIM_UNUSED_KSYMS 裁剪）
+          #   2) stub 提供真实的符号定义和 EXPORT_SYMBOL
+          # ============================================================
+
+          echo "🔧 确保 kasan_flag_enabled 在 KMI 符号列表中..."
+          # 只从 protected_exports 中删除（这些文件会导致 abi_verify 失败）
+          find . -name "abi_gki_protected_exports*" -type f -exec grep -l "kasan_flag_enabled" {} \; 2>/dev/null | while read f; do
+            echo "  📄 从 protected_exports $f 中移除 kasan_flag_enabled"
             sed -i '/kasan_flag_enabled/d' "$f"
           done
 
-          # ⚠️ 不能清空 abi_gki_aarch64 等符号列表文件！
-          # Kleaf 用它们作为 TRIM_UNUSED_KSYMS 白名单，清空 → 所有符号被裁剪 → 5566 modpost 错误
-          # 只需要：1) 删除 protected_exports  2) 禁用 strict_mode  3) 删除特定问题符号
-          echo "✅ 符号列表文件保持不变（仅清理了 protected_exports 和 kasan_flag_enabled）"
+          # 在 KMI 符号列表中添加 kasan_flag_enabled（如果不存在）
+          # 这些 abi_gki_aarch64* 文件是 TRIM_UNUSED_KSYMS 的白名单
+          for abi_file in $(find . -name "abi_gki_aarch64*" -not -name "*protected*" -type f 2>/dev/null); do
+            if [ -f "$abi_file" ] && [ -s "$abi_file" ]; then
+              if ! grep -q "kasan_flag_enabled" "$abi_file"; then
+                echo "  kasan_flag_enabled" >> "$abi_file"
+                echo "  ✅ 已添加 kasan_flag_enabled 到 $abi_file"
+              else
+                echo "  ✓ kasan_flag_enabled 已存在于 $abi_file"
+              fi
+            fi
+          done
 
           echo "🔧 创建 kasan_flag_enabled 符号 stub..."
-          # vendor 模块引用 kasan_flag_enabled 作为实际符号，
-          # 但未启用 CONFIG_KASAN 时 kasan.h 定义了 #define kasan_flag_enabled false
-          # 必须 #undef 后才能定义真实符号，否则预处理变成 bool false = false;
+          # vendor 模块引用 kasan_flag_enabled 作为真实符号，
+          # 但未启用 CONFIG_KASAN 时 kasan.h 中 #define kasan_flag_enabled false
+          # 必须 #undef 后才能定义真实变量，否则预处理器会展开成 bool false = false;
           cat > common/lib/kasan_stub.c << 'CEOF'
+          // SPDX-License-Identifier: GPL-2.0
+          // kasan_flag_enabled 符号 stub
+          // 为未启用 CONFIG_KASAN 的构建提供该符号的真实定义
           #include <linux/export.h>
+          #include <linux/types.h>
+
           #ifndef CONFIG_KASAN
-          /* kasan.h 中 #define kasan_flag_enabled false，必须先 undef */
+          // kasan.h 中 #define kasan_flag_enabled false，必须先 undef
           #undef kasan_flag_enabled
-          _Bool kasan_flag_enabled;
-          EXPORT_SYMBOL(kasan_flag_enabled);
+          bool kasan_flag_enabled;
+          EXPORT_SYMBOL_GPL(kasan_flag_enabled);
           #endif
           CEOF
           # 去掉 heredoc 产生的前导空格
