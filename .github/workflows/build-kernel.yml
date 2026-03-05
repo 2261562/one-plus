@@ -109,15 +109,15 @@ jobs:
           echo "📊 当前根目录可用空间: ${FREE_SPACE}GB"
 
           if [ "$FREE_SPACE" -gt 30 ]; then
-            SWAP_SIZE="8G"
+            SWAP_SIZE="12G"
           elif [ "$FREE_SPACE" -gt 20 ]; then
-            SWAP_SIZE="6G"
+            SWAP_SIZE="10G"
           else
-            SWAP_SIZE="4G"
+            SWAP_SIZE="8G"
           fi
 
           echo "🔍 正在尝试创建 Swap 文件 ($SWAP_SIZE)..."
-          sudo fallocate -l $SWAP_SIZE /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=4096
+          sudo fallocate -l $SWAP_SIZE /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
           
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
@@ -629,10 +629,10 @@ jobs:
           cd kernel_workspace/kernel_platform
           cat <<EOF > user.bazelrc
           # 限制 Bazel 系统的 JVM 内存，避免 OOM
-          startup --host_jvm_args=-Xmx3g
+          startup --host_jvm_args=-Xmx2g
           # 降低并发度，限制内存使用
           build --jobs=2
-          build --local_ram_resources=6144
+          build --local_ram_resources=3072
           build --local_cpu_resources=2
           build --worker_max_instances=1
           # 保留之前的优化
@@ -667,7 +667,7 @@ jobs:
           export CCACHE_EXEC=/usr/bin/ccache
           export CCACHE_DIR="/home/runner/.ccache"
           export LTO=none
-          export MAKEFLAGS="-j$(nproc)"
+          export MAKEFLAGS="-j2"
 
           BUILD_LOG="/tmp/kernel_build.log"
           
