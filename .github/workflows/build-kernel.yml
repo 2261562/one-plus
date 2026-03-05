@@ -307,17 +307,16 @@ jobs:
               /* === end kasan_flag_enabled stub === */
               """)
           else:
-              # 如果不是 static_key, 用 DEFINE_STATIC_KEY_FALSE 兜底
-              # (OnePlus/Qualcomm 可能修改了头文件)
+              # 如果不是 static_key，使用标准的 bool 变量
               stub_block = textwrap.dedent("""\
 
               /* === kasan_flag_enabled stub (auto-injected) === */
               #include <linux/kconfig.h>
               #if !IS_ENABLED(CONFIG_KASAN_HW_TAGS) && !IS_ENABLED(CONFIG_KASAN)
-              #include <linux/static_key.h>
+              #include <linux/types.h>
               #include <linux/module.h>
               #undef kasan_flag_enabled
-              DEFINE_STATIC_KEY_FALSE(kasan_flag_enabled);
+              bool kasan_flag_enabled = false;
               EXPORT_SYMBOL(kasan_flag_enabled);
               #endif
               /* === end kasan_flag_enabled stub === */
@@ -346,37 +345,7 @@ jobs:
                   f.write(stub_block)
               print(f"  ✅ [策略C] 已将 stub 注入到 {target} 末尾")
 
-          # ── 步骤4 (策略D): 同时创建独立的 kasan_stub.c + Makefile ──
-          # 作为备份方案（如果 Bazel 沙箱能拾取新文件的话）
-          standalone_stub = textwrap.dedent("""\
-          // SPDX-License-Identifier: GPL-2.0
-          /* kasan_flag_enabled standalone stub */
-          #include <linux/kconfig.h>
-          #if !IS_ENABLED(CONFIG_KASAN_HW_TAGS) && !IS_ENABLED(CONFIG_KASAN)
-          #include <linux/static_key.h>
-          #include <linux/module.h>
-          #undef kasan_flag_enabled
-          DEFINE_STATIC_KEY_FALSE(kasan_flag_enabled);
-          EXPORT_SYMBOL(kasan_flag_enabled);
-          #endif
-          """)
-
-          for root_dir in ["common"]:
-              stub_path = os.path.join(root_dir, "lib", "kasan_stub.c")
-              os.makedirs(os.path.dirname(stub_path), exist_ok=True)
-              with open(stub_path, 'w') as f:
-                  f.write(standalone_stub)
-              print(f"  ✅ [策略D] 已创建 {stub_path}")
-
-              makefile = os.path.join(root_dir, "lib", "Makefile")
-              if os.path.exists(makefile):
-                  with open(makefile) as f:
-                      mk = f.read()
-                  if "kasan_stub" not in mk:
-                      with open(makefile, 'a') as f:
-                          f.write("\n# KASAN flag stub (guarded in C source)\n")
-                          f.write("obj-y += kasan_stub.o\n")
-                      print(f"  ✅ [策略D] 已修改 {makefile}")
+          # ── 步骤4 (策略D): (已移除，避免与策略C重复定义) ──
 
           # ── 步骤5 (策略B): 修补 kasan-enabled.h ──
           # 在 non-KASAN/non-HW_TAGS 分支里补上 DECLARE，
@@ -387,13 +356,18 @@ jobs:
               # 在 #define kasan_flag_enabled 行之后加入 extern 声明
               # 将 #define 替换为条件编译块
               old = "#define kasan_flag_enabled false"
-              new = textwrap.dedent("""\
+              if is_static_key:
+                  declare_stmt = "DECLARE_STATIC_KEY_FALSE(kasan_flag_enabled);"
+              else:
+                  declare_stmt = "extern bool kasan_flag_enabled;"
+
+              new = textwrap.dedent(f"""\
               /* Original: #define kasan_flag_enabled false
                * Modified: provide a real extern declaration so modules
                * can reference the stub symbol. The stub is defined in
-               * mm/page_alloc.c (or lib/kasan_stub.c).
+               * mm/page_alloc.c.
                */
-              DECLARE_STATIC_KEY_FALSE(kasan_flag_enabled)""").strip()
+              {declare_stmt}""").strip()
               if old in hc:
                   hc = hc.replace(old, new)
                   with open(header_path, 'w') as f:
@@ -410,9 +384,6 @@ jobs:
           for f in common/mm/page_alloc.c msm-kernel/mm/page_alloc.c; do
             [ -f "$f" ] && echo "--- $f ---" && tail -15 "$f"
           done
-          echo ""
-          echo "📋 验证 kasan_stub.c:"
-          [ -f common/lib/kasan_stub.c ] && cat common/lib/kasan_stub.c
           echo ""
           echo "📋 验证 kasan-enabled.h 关键行:"
           grep -n "kasan_flag_enabled" common/include/linux/kasan-enabled.h 2>/dev/null || \
