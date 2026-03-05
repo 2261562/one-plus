@@ -208,10 +208,18 @@ jobs:
 
           for bzl_file in bzl_files:
               if not os.path.exists(bzl_file):
+                  print(f"  ⏭️ {bzl_file}: 文件不存在，跳过")
                   continue
               with open(bzl_file) as fh:
                   content = fh.read()
               original = content
+
+              # 先打印文件中所有包含目标选项的行（调试用）
+              for i, line in enumerate(content.split('\n'), 1):
+                  for opt in strict_options:
+                      if opt in line:
+                          print(f"  🔍 {bzl_file} 行 {i}: {line.strip()}")
+
               for opt in strict_options:
                   changed = False
                   # 格式1: 字典键值对 "kmi_symbol_list_strict_mode": True
@@ -219,22 +227,40 @@ jobs:
                   if re.search(p1, content):
                       content = re.sub(p1, r'\1False', content)
                       changed = True
+                      print(f"  ✅ {bzl_file}: {opt} (格式1: dict) True → False")
                   # 格式2: 函数参数赋值 kmi_symbol_list_strict_mode = True
                   p2 = rf'({opt}\s*=\s*)True'
                   if re.search(p2, content):
                       content = re.sub(p2, r'\1False', content)
                       changed = True
-                  if changed:
-                      print(f"  ✅ {bzl_file}: {opt} True → False")
+                      print(f"  ✅ {bzl_file}: {opt} (格式2: kwarg) True → False")
+                  if not changed:
+                      print(f"  ⚠️ {bzl_file}: {opt} 未找到 True 值（可能已为 False 或不存在）")
+
               if content != original:
                   with open(bzl_file, 'w') as fh:
                       fh.write(content)
+                  print(f"  💾 {bzl_file}: 已保存修改")
               else:
-                  # 输出文件中已有的相关行（用于调试）
-                  for i, line in enumerate(content.split('\n'), 1):
-                      if any(opt in line for opt in strict_options):
-                          print(f"  ⚠️ {bzl_file} 行 {i}: {line.strip()}")
+                  print(f"  ℹ️ {bzl_file}: 无需修改")
           PYEOF
+
+          # === sed 兜底：暴力替换所有 BUILD.bazel 中的 trim_nonlisted_kmi ===
+          # Python 正则可能因格式差异而遗漏，sed 作为最后防线
+          echo "🔧 sed 兜底：确保 trim_nonlisted_kmi 和 kmi_symbol_list_strict_mode 被禁用..."
+          for bzl in $(find . -name "BUILD.bazel" -path "*/common/*" -o -name "BUILD.bazel" -path "*/msm-kernel/*" | head -20); do
+            for opt in trim_nonlisted_kmi kmi_symbol_list_strict_mode; do
+              # 处理所有可能的空白和引号格式
+              if grep -q "${opt}.*True" "$bzl" 2>/dev/null; then
+                sed -i "s/\(${opt}[\"]*\s*[:=]\s*\)True/\1False/g" "$bzl"
+                echo "  ✅ sed 兜底: $bzl 中 ${opt} True → False"
+              fi
+            done
+          done
+
+          # === 额外检查：搜索整个 kernel_platform 中所有包含 trim_nonlisted_kmi 的 BUILD 文件 ===
+          echo "🔍 全局搜索 trim_nonlisted_kmi 和 kmi_symbol_list_strict_mode..."
+          grep -rn "trim_nonlisted_kmi\|kmi_symbol_list_strict_mode" --include="BUILD.bazel" --include="*.bzl" . 2>/dev/null | grep -i "true" | head -20 || echo "  ✅ 未发现残留的 True 值"
 
           echo "🔧 抑制 DTC 设备树编译器警告..."
           # pineapple-coresight.dtsi 等文件有 "also defined at" 重复节点警告，
@@ -547,6 +573,9 @@ jobs:
           build --verbose_failures
           # 沙箱调试：失败时保留沙箱目录并输出详细信息
           build --sandbox_debug
+          
+          # ==== 终极关闭 KMI 严格裁剪 ====
+          build --notrim
           EOF
 
           echo "📋 user.bazelrc 内容:"
@@ -575,6 +604,14 @@ jobs:
           export LTO=none
           export MAKEFLAGS="-j2"
 
+          # ==== KMI/ABI 终极解决办法 - 覆盖环境变量与 config ====
+          export TRIM_NONLISTED_KMI=0
+          export KMI_SYMBOL_LIST_STRICT_MODE=0
+          export KMI_SYMBOL_LIST_MODULE_GROUPING=0
+          # 强制修改所有可能包含 TRIM 宏的 build.config
+          find kernel_platform -name "build.config*" -type f -exec sed -i 's/TRIM_NONLISTED_KMI=1/TRIM_NONLISTED_KMI=0/g' {} + 2>/dev/null || true
+          find kernel_platform -name "build.config*" -type f -exec sed -i 's/KMI_SYMBOL_LIST_STRICT_MODE=1/KMI_SYMBOL_LIST_STRICT_MODE=0/g' {} + 2>/dev/null || true
+          
           BUILD_LOG="/tmp/kernel_build.log"
           
           # 使用 tee 同时输出到控制台和日志文件
