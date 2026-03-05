@@ -189,33 +189,63 @@ jobs:
           rm -f common/android/abi_gki_protected_exports_* || true
           rm -f msm-kernel/android/abi_gki_protected_exports_* || true
 
-          echo "🧹 禁用 KMI 严格模式..."
+          echo "🧹 禁用 KMI/ABI 严格检查..."
           python3 << 'PYEOF'
-          import re
+          import re, os, glob
 
-          f = "common/BUILD.bazel"
-          with open(f) as fh:
-              content = fh.read()
+          # 搜索所有可能包含 Kleaf 配置的 BUILD.bazel 文件
+          bzl_files = ["common/BUILD.bazel", "msm-kernel/BUILD.bazel"]
+          # 也搜索子目录（某些 vendor 配置可能在其他位置）
+          for extra in glob.glob("*/BUILD.bazel"):
+              if extra not in bzl_files:
+                  bzl_files.append(extra)
 
-          original = content
+          # 需要禁用的严格模式选项
+          strict_options = [
+              "kmi_symbol_list_strict_mode",
+              "trim_nonlisted_kmi",
+          ]
 
-          # 只修改值: True → False
-          content = re.sub(
-              r'(kmi_symbol_list_strict_mode\s*=\s*)True',
-              r'\1False',
-              content
-          )
-
-          if content != original:
-              with open(f, 'w') as fh:
-                  fh.write(content)
-              print("  ✅ kmi_symbol_list_strict_mode: True → False")
-          else:
-              print("  ⚠️ 未找到 kmi_symbol_list_strict_mode = True")
-              for i, line in enumerate(content.split('\n'), 1):
-                  if 'kmi_symbol_list' in line:
-                      print(f"    行 {i}: {line.strip()}")
+          for bzl_file in bzl_files:
+              if not os.path.exists(bzl_file):
+                  continue
+              with open(bzl_file) as fh:
+                  content = fh.read()
+              original = content
+              for opt in strict_options:
+                  pattern = rf'({opt}\s*=\s*)True'
+                  if re.search(pattern, content):
+                      content = re.sub(pattern, rf'\1False', content)
+                      print(f"  ✅ {bzl_file}: {opt} True → False")
+              if content != original:
+                  with open(bzl_file, 'w') as fh:
+                      fh.write(content)
+              else:
+                  # 输出文件中已有的相关行（用于调试）
+                  for i, line in enumerate(content.split('\n'), 1):
+                      if any(opt in line for opt in strict_options):
+                          print(f"  ℹ️ {bzl_file} 行 {i}: {line.strip()}")
           PYEOF
+
+          echo "🔧 抑制 DTC 设备树编译器警告..."
+          # pineapple-coresight.dtsi 等文件有 "also defined at" 重复节点警告，
+          # dtc 的 -Werror 会将这些警告提升为错误。
+          # 添加 -Wno-unique_unit_address 等标志来抑制
+          for makefile_lib in $(find . -path "*/scripts/Makefile.lib" -type f 2>/dev/null); do
+            if ! grep -q "Wno-unique_unit_address" "$makefile_lib"; then
+              # 在 DTC_FLAGS 行后追加警告抑制
+              sed -i '/^DTC_FLAGS/a DTC_FLAGS += -Wno-unique_unit_address -Wno-interrupt_provider -Wno-graph_child_address' "$makefile_lib" 2>/dev/null || true
+              # 如果没有 DTC_FLAGS 行，直接追加到末尾
+              if ! grep -q "Wno-unique_unit_address" "$makefile_lib"; then
+                echo "" >> "$makefile_lib"
+                echo "DTC_FLAGS += -Wno-unique_unit_address -Wno-interrupt_provider -Wno-graph_child_address" >> "$makefile_lib"
+              fi
+              echo "  ✅ 已添加 DTC 警告抑制到 $makefile_lib"
+            fi
+          done
+
+          # 也通过环境变量设置（双保险）
+          echo "DTC_FLAGS='-Wno-unique_unit_address -Wno-interrupt_provider -Wno-graph_child_address'" >> $GITHUB_ENV
 
           # ============================================================
           # 修复 kasan_flag_enabled 符号问题
@@ -224,14 +254,10 @@ jobs:
           # 未启用 CONFIG_KASAN 时 kasan.h 定义 #define kasan_flag_enabled false
           # 导致内核不会导出该符号，modpost 报 undefined。
           #
-          # 方案（三管齐下）:
+          # 方案:
           #   1) 从 protected_exports 中删除（避免 abi_verify 失败）
-          #   2) BUILD.bazel 中 trim_nonlisted_kmi = False（防止 TRIM 裁剪）
+          #   2) trim_nonlisted_kmi = False（已在上方 Python 脚本中设置）
           #   3) kasan_stub.c 提供真实符号定义 + EXPORT_SYMBOL
-          #
-          # ⚠️ 不能修改 abi_gki_aarch64* 符号列表文件！
-          # 这些文件是 configparser INI 格式，随意追加会导致
-          # abi_flatten_symbol_list.py 解析崩溃（AttributeError）
           # ============================================================
 
           echo "🔧 清理 protected_exports 中的 kasan_flag_enabled..."
@@ -239,31 +265,6 @@ jobs:
             echo "  📄 从 $f 中移除 kasan_flag_enabled"
             sed -i '/kasan_flag_enabled/d' "$f"
           done
-
-          echo "🔧 禁用 trim_nonlisted_kmi（防止非 KMI 符号被裁剪）..."
-          python3 << 'PYEOF2'
-          import re
-
-          for bzl_file in ["common/BUILD.bazel", "msm-kernel/BUILD.bazel"]:
-              try:
-                  with open(bzl_file) as fh:
-                      content = fh.read()
-                  original = content
-                  # trim_nonlisted_kmi = True → False
-                  content = re.sub(
-                      r'(trim_nonlisted_kmi\s*=\s*)True',
-                      r'\1False',
-                      content
-                  )
-                  if content != original:
-                      with open(bzl_file, 'w') as fh:
-                          fh.write(content)
-                      print(f"  ✅ {bzl_file}: trim_nonlisted_kmi True → False")
-                  else:
-                      print(f"  ℹ️ {bzl_file}: 未找到 trim_nonlisted_kmi = True")
-              except FileNotFoundError:
-                  print(f"  ⚠️ {bzl_file} 不存在，跳过")
-          PYEOF2
 
           echo "🔧 创建 kasan_flag_enabled 符号 stub..."
           cat > common/lib/kasan_stub.c << 'CEOF'
@@ -292,7 +293,7 @@ jobs:
           echo "📋 kasan_stub.c 内容:"
           cat common/lib/kasan_stub.c
 
-          echo "✅ ABI/KMI 已处理"
+          echo "✅ ABI/KMI/DTC 已处理"
 
       - name: 移除 -dirty 后缀
         run: |
