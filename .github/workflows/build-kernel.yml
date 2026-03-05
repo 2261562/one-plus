@@ -248,144 +248,176 @@ jobs:
           echo "DTC_FLAGS='-Wno-unique_unit_address -Wno-interrupt_provider -Wno-graph_child_address'" >> $GITHUB_ENV
 
           # ============================================================
-          # 修复 kasan_flag_enabled 符号问题
-          # 
-          # 背景：vendor 模块引用 kasan_flag_enabled 作为真实符号，但
-          # 未启用 CONFIG_KASAN 时 kasan-enabled.h 把 kasan_flag_enabled
-          # 定义为 #define kasan_flag_enabled false (宏), 导致：
-          #   a) 内核不会产生该符号的真实存储
-          #   b) modpost 对 vendor 模块报 "undefined symbol"
-          #   c) 如果 stub 中 include kasan-enabled.h 会触发宏展开冲突
+          # 修复 kasan_flag_enabled 符号问题 (多重策略)
           #
-          # 方案:
-          #   1) 从 protected_exports / KMI 符号列表中清理
-          #   2) trim_nonlisted_kmi = False（已在上方 Python 脚本中设置）
-          #   3) 只在 common/lib/ 创建 kasan_stub.c（不在 msm-kernel 创建，
-          #      避免链接时 multiple definition）
-          #   4) stub 中不 include kasan-enabled.h（避免宏冲突），
-          #      直接使用 DECLARE/DEFINE_STATIC_KEY_FALSE
-          #   5) 始终使用 #if !IS_ENABLED(CONFIG_KASAN) 条件编译守卫
+          # 背景：vendor/GKI 模块引用 kasan_flag_enabled 作为外部符号，
+          # 但未启用 CONFIG_KASAN_HW_TAGS 时内核不产生该符号。
+          #
+          # 策略:
+          #   A) 清理 KMI / protected_exports
+          #   B) 修补 kasan-enabled.h 确保声明存在
+          #   C) 在已有的 obj-y 文件末尾注入 stub (绕过 Bazel 沙箱)
+          #   D) 同时创建 kasan_stub.c + Makefile 作为备份
           # ============================================================
 
-          echo "🔧 清理 protected_exports / KMI 中的 kasan_flag_enabled..."
+          echo "🔧 [策略A] 清理 protected_exports / KMI 中的 kasan_flag_enabled..."
           find . -name "abi_gki_protected_exports*" -type f -exec grep -l "kasan_flag_enabled" {} \; 2>/dev/null | while read f; do
             echo "  📄 从 $f 中移除 kasan_flag_enabled"
             sed -i '/kasan_flag_enabled/d' "$f"
           done
-          # 同时从 KMI 符号列表中移除（如果存在）
           find . -name "abi_gki_aarch64*" -type f 2>/dev/null | xargs grep -l "kasan_flag_enabled" 2>/dev/null | while read f; do
             echo "  📄 从 KMI 符号列表 $f 中移除 kasan_flag_enabled"
             sed -i '/kasan_flag_enabled/d' "$f"
           done
 
-          echo "🔧 创建 kasan_flag_enabled 符号 stub..."
+          echo "🔧 [策略B/C/D] 注入 kasan_flag_enabled stub..."
           python3 << 'STUBEOF'
-          import os, textwrap, glob
+          import os, textwrap, glob, re
 
-          # ==============================================================
-          # 关键：不 include kasan-enabled.h ！
-          # 因为在 !CONFIG_KASAN 时，该头文件会：
-          #   #define kasan_flag_enabled false
-          # 这会导致 DEFINE_STATIC_KEY_FALSE(kasan_flag_enabled) 被
-          # 预处理器展开为 DEFINE_STATIC_KEY_FALSE(false)，编译失败。
-          #
-          # 我们直接使用 jump_label.h 中的宏来定义该 static key。
-          # ==============================================================
+          # ── 步骤1: 检测 kasan-enabled.h 中 kasan_flag_enabled 的实际类型 ──
+          header_candidates = glob.glob("*/include/linux/kasan-enabled.h")
+          is_static_key = False
+          has_define_macro = False
+          header_path = None
 
-          guarded_stub = textwrap.dedent("""\
+          for hp in header_candidates:
+              with open(hp) as f:
+                  hcontent = f.read()
+              header_path = hp
+              if "DECLARE_STATIC_KEY_FALSE(kasan_flag_enabled)" in hcontent:
+                  is_static_key = True
+              if "#define kasan_flag_enabled" in hcontent:
+                  has_define_macro = True
+              print(f"  📄 {hp}: static_key={is_static_key}, define_macro={has_define_macro}")
+
+          # ── 步骤2: 构造合适的 stub 代码块 ──
+          # 用于追加到已有文件末尾 (绕过 Bazel 沙箱对新文件的限制)
+          if is_static_key:
+              stub_block = textwrap.dedent("""\
+
+              /* === kasan_flag_enabled stub (auto-injected) === */
+              #include <linux/kconfig.h>
+              #if !IS_ENABLED(CONFIG_KASAN_HW_TAGS) && !IS_ENABLED(CONFIG_KASAN)
+              #include <linux/static_key.h>
+              #include <linux/module.h>
+              #undef kasan_flag_enabled
+              DEFINE_STATIC_KEY_FALSE(kasan_flag_enabled);
+              EXPORT_SYMBOL(kasan_flag_enabled);
+              #endif
+              /* === end kasan_flag_enabled stub === */
+              """)
+          else:
+              # 如果不是 static_key, 用 DEFINE_STATIC_KEY_FALSE 兜底
+              # (OnePlus/Qualcomm 可能修改了头文件)
+              stub_block = textwrap.dedent("""\
+
+              /* === kasan_flag_enabled stub (auto-injected) === */
+              #include <linux/kconfig.h>
+              #if !IS_ENABLED(CONFIG_KASAN_HW_TAGS) && !IS_ENABLED(CONFIG_KASAN)
+              #include <linux/static_key.h>
+              #include <linux/module.h>
+              #undef kasan_flag_enabled
+              DEFINE_STATIC_KEY_FALSE(kasan_flag_enabled);
+              EXPORT_SYMBOL(kasan_flag_enabled);
+              #endif
+              /* === end kasan_flag_enabled stub === */
+              """)
+
+          # ── 步骤3 (策略C): 注入到已有的 obj-y 源文件 ──
+          # 选择 mm/page_alloc.c (始终以 obj-y 编译进 vmlinux)
+          # 这样即使 Bazel 沙箱不包含新文件，stub 也能生效
+          inject_targets = []
+          for root_dir in ["common", "msm-kernel"]:
+              candidate = os.path.join(root_dir, "mm", "page_alloc.c")
+              if os.path.isfile(candidate):
+                  inject_targets.append(candidate)
+              # 备选: init/main.c
+              candidate2 = os.path.join(root_dir, "init", "main.c")
+              if os.path.isfile(candidate2) and not inject_targets:
+                  inject_targets.append(candidate2)
+
+          for target in inject_targets:
+              with open(target) as f:
+                  content = f.read()
+              if "kasan_flag_enabled stub" in content:
+                  print(f"  ℹ️ {target} 中已有 stub，跳过")
+                  continue
+              with open(target, 'a') as f:
+                  f.write(stub_block)
+              print(f"  ✅ [策略C] 已将 stub 注入到 {target} 末尾")
+
+          # ── 步骤4 (策略D): 同时创建独立的 kasan_stub.c + Makefile ──
+          # 作为备份方案（如果 Bazel 沙箱能拾取新文件的话）
+          standalone_stub = textwrap.dedent("""\
           // SPDX-License-Identifier: GPL-2.0
-          /*
-           * kasan_flag_enabled symbol stub
-           *
-           * When CONFIG_KASAN is disabled, vendor/GKI modules still
-           * reference kasan_flag_enabled as a real symbol. This stub
-           * provides the actual DEFINE_STATIC_KEY_FALSE storage so
-           * the linker/modpost can resolve it.
-           *
-           * IMPORTANT: We do NOT include <linux/kasan-enabled.h> here
-           * because when CONFIG_KASAN is off, that header does:
-           *   #define kasan_flag_enabled false
-           * which would cause macro expansion conflicts with
-           * DEFINE_STATIC_KEY_FALSE(kasan_flag_enabled).
-           */
+          /* kasan_flag_enabled standalone stub */
           #include <linux/kconfig.h>
-
-          #if !IS_ENABLED(CONFIG_KASAN)
-
-          #include <linux/jump_label.h>
+          #if !IS_ENABLED(CONFIG_KASAN_HW_TAGS) && !IS_ENABLED(CONFIG_KASAN)
+          #include <linux/static_key.h>
           #include <linux/module.h>
-
-          /* Undo any macro definition that leaked from headers */
           #undef kasan_flag_enabled
-
           DEFINE_STATIC_KEY_FALSE(kasan_flag_enabled);
           EXPORT_SYMBOL(kasan_flag_enabled);
-
-          #endif /* !CONFIG_KASAN */
+          #endif
           """)
 
-          # 只写入到 common/lib/kasan_stub.c
-          # 不在 msm-kernel 中创建，避免链接时 multiple definition
-          stub_path = "common/lib/kasan_stub.c"
-          os.makedirs(os.path.dirname(stub_path), exist_ok=True)
-          with open(stub_path, 'w') as f:
-              f.write(guarded_stub)
-          print(f"  ✅ 已创建 {stub_path}")
+          for root_dir in ["common"]:
+              stub_path = os.path.join(root_dir, "lib", "kasan_stub.c")
+              os.makedirs(os.path.dirname(stub_path), exist_ok=True)
+              with open(stub_path, 'w') as f:
+                  f.write(standalone_stub)
+              print(f"  ✅ [策略D] 已创建 {stub_path}")
 
-          # -------------------------------------------------------
-          # 检查源码中是否已有 kasan_flag_enabled 的定义
-          # 如果已有，且被 CONFIG_KASAN 守卫，则无冲突（因为我们的
-          # stub 只在 !CONFIG_KASAN 时编译）
-          # -------------------------------------------------------
-          for root_dir in ["common", "msm-kernel"]:
-              if not os.path.isdir(root_dir):
-                  continue
-              existing_defs = []
-              for dirpath, dirnames, filenames in os.walk(root_dir):
-                  if "kasan_stub.c" in filenames:
-                      continue
-                  for fname in filenames:
-                      if not fname.endswith('.c'):
-                          continue
-                      fpath = os.path.join(dirpath, fname)
-                      try:
-                          with open(fpath) as fh:
-                              content = fh.read()
-                          if "DEFINE_STATIC_KEY_FALSE(kasan_flag_enabled)" in content:
-                              existing_defs.append(fpath)
-                      except:
-                          pass
-              if existing_defs:
-                  print(f"  ℹ️ 在 {root_dir} 中发现已有 kasan_flag_enabled 定义（应在 CONFIG_KASAN=y 时编译）:")
-                  for p in existing_defs:
-                      print(f"      {p}")
-                  print(f"  → 我们的 stub 只在 !CONFIG_KASAN 时编译，不会冲突")
+              makefile = os.path.join(root_dir, "lib", "Makefile")
+              if os.path.exists(makefile):
+                  with open(makefile) as f:
+                      mk = f.read()
+                  if "kasan_stub" not in mk:
+                      with open(makefile, 'a') as f:
+                          f.write("\n# KASAN flag stub (guarded in C source)\n")
+                          f.write("obj-y += kasan_stub.o\n")
+                      print(f"  ✅ [策略D] 已修改 {makefile}")
 
-          # 追加到 common/lib/Makefile（无条件编译，C 代码内部已有守卫）
-          # 使用 obj-y 以确保始终编译进 vmlinux，C 代码内部的
-          # #if !IS_ENABLED(CONFIG_KASAN) 会在 KASAN 启用时让文件为空
-          common_makefile = "common/lib/Makefile"
-          if os.path.exists(common_makefile):
-              with open(common_makefile) as f:
-                  content = f.read()
-              if "kasan_stub" not in content:
-                  with open(common_makefile, 'a') as f:
-                      f.write("\n# KASAN flag stub - provides kasan_flag_enabled symbol\n")
-                      f.write("# when CONFIG_KASAN is not set (guarded in C source)\n")
-                      f.write("obj-y += kasan_stub.o\n")
-                  print(f"  ✅ 已添加 kasan_stub.o 到 {common_makefile}")
-              else:
-                  print(f"  ℹ️ {common_makefile} 中已有 kasan_stub")
-          else:
-              print(f"  ⚠️ {common_makefile} 不存在")
+          # ── 步骤5 (策略B): 修补 kasan-enabled.h ──
+          # 在 non-KASAN/non-HW_TAGS 分支里补上 DECLARE，
+          # 让模块编译时见到正确的外部声明而不是宏
+          if header_path and has_define_macro:
+              with open(header_path) as f:
+                  hc = f.read()
+              # 在 #define kasan_flag_enabled 行之后加入 extern 声明
+              # 将 #define 替换为条件编译块
+              old = "#define kasan_flag_enabled false"
+              new = textwrap.dedent("""\
+              /* Original: #define kasan_flag_enabled false
+               * Modified: provide a real extern declaration so modules
+               * can reference the stub symbol. The stub is defined in
+               * mm/page_alloc.c (or lib/kasan_stub.c).
+               */
+              DECLARE_STATIC_KEY_FALSE(kasan_flag_enabled)""").strip()
+              if old in hc:
+                  hc = hc.replace(old, new)
+                  with open(header_path, 'w') as f:
+                      f.write(hc)
+                  print(f"  ✅ [策略B] 已修补 {header_path}")
 
+          print("\n📊 kasan_flag_enabled 修复摘要:")
+          print(f"  header_type: static_key={is_static_key}, define_macro={has_define_macro}")
+          print(f"  inject_targets: {inject_targets}")
           STUBEOF
 
-          echo "📋 验证 kasan_stub.c 内容:"
-          cat common/lib/kasan_stub.c
           echo ""
-          echo "📋 验证 common/lib/Makefile 末尾:"
-          tail -5 common/lib/Makefile
+          echo "📋 验证注入结果 (page_alloc.c 末尾):"
+          for f in common/mm/page_alloc.c msm-kernel/mm/page_alloc.c; do
+            [ -f "$f" ] && echo "--- $f ---" && tail -15 "$f"
+          done
+          echo ""
+          echo "📋 验证 kasan_stub.c:"
+          [ -f common/lib/kasan_stub.c ] && cat common/lib/kasan_stub.c
+          echo ""
+          echo "📋 验证 kasan-enabled.h 关键行:"
+          grep -n "kasan_flag_enabled" common/include/linux/kasan-enabled.h 2>/dev/null || \
+          grep -rn "kasan_flag_enabled" */include/linux/kasan-enabled.h 2>/dev/null || \
+          echo "  (未找到 kasan-enabled.h)"
 
           echo "✅ ABI/KMI/DTC/KASAN 已处理"
 
