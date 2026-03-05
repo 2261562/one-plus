@@ -274,36 +274,35 @@ jobs:
 
           echo "🔧 创建 kasan_flag_enabled 符号 stub（使用 Python 避免 heredoc 缩进问题）..."
           python3 << 'STUBEOF'
-          import os, textwrap
+          import os, textwrap, glob
 
           stub_code = textwrap.dedent("""\
           // SPDX-License-Identifier: GPL-2.0
           /*
            * kasan_flag_enabled symbol stub
            *
-           * When CONFIG_KASAN is disabled, kasan.h defines:
-           *   #define kasan_flag_enabled false
-           * This causes the symbol to not exist in the kernel image,
-           * but vendor/GKI modules still reference it as a real symbol.
+           * When CONFIG_KASAN is disabled, include/linux/kasan-enabled.h
+           * declares kasan_flag_enabled via DECLARE_STATIC_KEY_FALSE(),
+           * but no translation unit actually defines (DEFINE_STATIC_KEY_FALSE)
+           * this symbol. Vendor/GKI modules reference it, so modpost fails
+           * with "undefined symbol".
            *
-           * This stub provides a real definition so modpost can resolve it.
+           * This stub provides the real DEFINE_STATIC_KEY_FALSE definition
+           * so the linker can resolve it.  It is only compiled when
+           * CONFIG_KASAN is *not* set (guarded both here and in the
+           * Makefile/Kconfig).
            */
 
-          #include <linux/types.h>
+          #include <linux/jump_label.h>
           #include <linux/module.h>
+          #include <linux/kasan-enabled.h>
 
           /*
-           * Must undef the macro BEFORE declaring the variable.
-           * kasan.h (included transitively) #defines kasan_flag_enabled
-           * as 'false' when CONFIG_KASAN is not set.
+           * Provide the actual storage for the static key that
+           * kasan-enabled.h only declares.
            */
-          #undef kasan_flag_enabled
-
-          bool kasan_flag_enabled __read_mostly;
+          DEFINE_STATIC_KEY_FALSE(kasan_flag_enabled);
           EXPORT_SYMBOL(kasan_flag_enabled);
-
-          MODULE_LICENSE("GPL");
-          MODULE_DESCRIPTION("KASAN flag stub for non-KASAN builds");
           """)
 
           # 写入到 common/lib/kasan_stub.c
@@ -320,7 +319,60 @@ jobs:
                   f.write(stub_code)
               print(f"  ✅ 已创建 {msm_stub_path}")
 
-          # 追加到 common/lib/Makefile
+          # -------------------------------------------------------
+          # 关键修复：如果内核源码中已经存在一个 lib/kasan.c 或
+          # mm/kasan/ 目录下已有 kasan_flag_enabled 的定义，
+          # 必须确保不会重复定义。
+          # 搜索源码中已有的 DEFINE_STATIC_KEY_FALSE(kasan_flag_enabled)
+          # -------------------------------------------------------
+          for root_dir in ["common", "msm-kernel"]:
+              existing_defs = []
+              for dirpath, dirnames, filenames in os.walk(root_dir):
+                  # 跳过我们自己的 stub
+                  if "kasan_stub.c" in filenames:
+                      continue
+                  for fname in filenames:
+                      if not fname.endswith('.c'):
+                          continue
+                      fpath = os.path.join(dirpath, fname)
+                      try:
+                          with open(fpath) as fh:
+                              content = fh.read()
+                          if "DEFINE_STATIC_KEY_FALSE(kasan_flag_enabled)" in content:
+                              existing_defs.append(fpath)
+                      except:
+                          pass
+              if existing_defs:
+                  print(f"  ⚠️ 在 {root_dir} 中发现已有 kasan_flag_enabled 定义:")
+                  for p in existing_defs:
+                      print(f"      {p}")
+                  print(f"  → 为避免重复定义，将 stub 改为条件编译守卫")
+                  # 用条件编译包裹 stub
+                  guarded_stub = textwrap.dedent("""\
+                  // SPDX-License-Identifier: GPL-2.0
+                  /*
+                   * kasan_flag_enabled symbol stub (conditional)
+                   * Only compiled when CONFIG_KASAN is NOT set,
+                   * to avoid conflicting with the real KASAN definition.
+                   */
+                  #include <linux/kconfig.h>
+                  #if !IS_ENABLED(CONFIG_KASAN)
+
+                  #include <linux/jump_label.h>
+                  #include <linux/module.h>
+                  #include <linux/kasan-enabled.h>
+
+                  DEFINE_STATIC_KEY_FALSE(kasan_flag_enabled);
+                  EXPORT_SYMBOL(kasan_flag_enabled);
+
+                  #endif /* !CONFIG_KASAN */
+                  """)
+                  stub_in_root = os.path.join(root_dir, "lib", "kasan_stub.c")
+                  with open(stub_in_root, 'w') as f:
+                      f.write(guarded_stub)
+                  print(f"  ✅ 已用条件编译版本覆盖 {stub_in_root}")
+
+          # 追加到 common/lib/Makefile（使用条件编译）
           common_makefile = "common/lib/Makefile"
           if os.path.exists(common_makefile):
               with open(common_makefile) as f:
@@ -328,12 +380,14 @@ jobs:
               if "kasan_stub" not in content:
                   with open(common_makefile, 'a') as f:
                       f.write("\n# KASAN flag stub for non-KASAN builds\n")
+                      f.write("ifndef CONFIG_KASAN\n")
                       f.write("obj-y += kasan_stub.o\n")
-                  print(f"  ✅ 已添加 kasan_stub.o 到 {common_makefile}")
+                      f.write("endif\n")
+                  print(f"  ✅ 已添加 kasan_stub.o 到 {common_makefile}（条件编译）")
               else:
                   print(f"  ℹ️ {common_makefile} 中已有 kasan_stub")
 
-          # 追加到 msm-kernel/lib/Makefile
+          # 追加到 msm-kernel/lib/Makefile（使用条件编译）
           msm_makefile = "msm-kernel/lib/Makefile"
           if os.path.exists(msm_makefile):
               with open(msm_makefile) as f:
@@ -341,8 +395,10 @@ jobs:
               if "kasan_stub" not in content:
                   with open(msm_makefile, 'a') as f:
                       f.write("\n# KASAN flag stub for non-KASAN builds\n")
+                      f.write("ifndef CONFIG_KASAN\n")
                       f.write("obj-y += kasan_stub.o\n")
-                  print(f"  ✅ 已添加 kasan_stub.o 到 {msm_makefile}")
+                      f.write("endif\n")
+                  print(f"  ✅ 已添加 kasan_stub.o 到 {msm_makefile}（条件编译）")
               else:
                   print(f"  ℹ️ {msm_makefile} 中已有 kasan_stub")
 
