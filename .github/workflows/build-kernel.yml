@@ -255,43 +255,104 @@ jobs:
           # 导致内核不会导出该符号，modpost 报 undefined。
           #
           # 方案:
-          #   1) 从 protected_exports 中删除（避免 abi_verify 失败）
+          #   1) 从 protected_exports / KMI 符号列表中清理
           #   2) trim_nonlisted_kmi = False（已在上方 Python 脚本中设置）
           #   3) kasan_stub.c 提供真实符号定义 + EXPORT_SYMBOL
+          #   4) 同时修补 Makefile 和 Bazel BUILD 文件
           # ============================================================
 
-          echo "🔧 清理 protected_exports 中的 kasan_flag_enabled..."
+          echo "🔧 清理 protected_exports / KMI 中的 kasan_flag_enabled..."
           find . -name "abi_gki_protected_exports*" -type f -exec grep -l "kasan_flag_enabled" {} \; 2>/dev/null | while read f; do
             echo "  📄 从 $f 中移除 kasan_flag_enabled"
             sed -i '/kasan_flag_enabled/d' "$f"
           done
+          # 同时从 KMI 符号列表中移除（如果存在）
+          find . -name "abi_gki_aarch64*" -type f 2>/dev/null | xargs grep -l "kasan_flag_enabled" 2>/dev/null | while read f; do
+            echo "  📄 从 KMI 符号列表 $f 中移除 kasan_flag_enabled"
+            sed -i '/kasan_flag_enabled/d' "$f"
+          done
 
-          echo "🔧 创建 kasan_flag_enabled 符号 stub..."
-          cat > common/lib/kasan_stub.c << 'CEOF'
+          echo "🔧 创建 kasan_flag_enabled 符号 stub（使用 Python 避免 heredoc 缩进问题）..."
+          python3 << 'STUBEOF'
+          import os, textwrap
+
+          stub_code = textwrap.dedent("""\
           // SPDX-License-Identifier: GPL-2.0
-          // kasan_flag_enabled 符号 stub
-          // 为未启用 CONFIG_KASAN 的构建提供该符号的真实定义
-          #include <linux/export.h>
+          /*
+           * kasan_flag_enabled symbol stub
+           *
+           * When CONFIG_KASAN is disabled, kasan.h defines:
+           *   #define kasan_flag_enabled false
+           * This causes the symbol to not exist in the kernel image,
+           * but vendor/GKI modules still reference it as a real symbol.
+           *
+           * This stub provides a real definition so modpost can resolve it.
+           */
+
           #include <linux/types.h>
+          #include <linux/module.h>
 
-          #ifndef CONFIG_KASAN
-          // kasan.h 中 #define kasan_flag_enabled false，必须先 undef
+          /*
+           * Must undef the macro BEFORE declaring the variable.
+           * kasan.h (included transitively) #defines kasan_flag_enabled
+           * as 'false' when CONFIG_KASAN is not set.
+           */
           #undef kasan_flag_enabled
-          bool kasan_flag_enabled;
-          EXPORT_SYMBOL_GPL(kasan_flag_enabled);
-          #endif
-          CEOF
-          # 去掉 heredoc 产生的前导空格
-          sed -i 's/^          //' common/lib/kasan_stub.c
 
-          # 追加到 lib/Makefile
-          if ! grep -q "kasan_stub" common/lib/Makefile; then
-            echo "obj-y += kasan_stub.o" >> common/lib/Makefile
-            echo "  ✅ 已添加 kasan_stub.o 到 common/lib/Makefile"
-          fi
+          bool kasan_flag_enabled __read_mostly;
+          EXPORT_SYMBOL(kasan_flag_enabled);
 
-          echo "📋 kasan_stub.c 内容:"
+          MODULE_LICENSE("GPL");
+          MODULE_DESCRIPTION("KASAN flag stub for non-KASAN builds");
+          """)
+
+          # 写入到 common/lib/kasan_stub.c
+          stub_path = "common/lib/kasan_stub.c"
+          os.makedirs(os.path.dirname(stub_path), exist_ok=True)
+          with open(stub_path, 'w') as f:
+              f.write(stub_code)
+          print(f"  ✅ 已创建 {stub_path}")
+
+          # 同时写入到 msm-kernel/lib/kasan_stub.c（vendor 内核可能使用这个路径）
+          msm_stub_path = "msm-kernel/lib/kasan_stub.c"
+          if os.path.isdir("msm-kernel/lib"):
+              with open(msm_stub_path, 'w') as f:
+                  f.write(stub_code)
+              print(f"  ✅ 已创建 {msm_stub_path}")
+
+          # 追加到 common/lib/Makefile
+          common_makefile = "common/lib/Makefile"
+          if os.path.exists(common_makefile):
+              with open(common_makefile) as f:
+                  content = f.read()
+              if "kasan_stub" not in content:
+                  with open(common_makefile, 'a') as f:
+                      f.write("\n# KASAN flag stub for non-KASAN builds\n")
+                      f.write("obj-y += kasan_stub.o\n")
+                  print(f"  ✅ 已添加 kasan_stub.o 到 {common_makefile}")
+              else:
+                  print(f"  ℹ️ {common_makefile} 中已有 kasan_stub")
+
+          # 追加到 msm-kernel/lib/Makefile
+          msm_makefile = "msm-kernel/lib/Makefile"
+          if os.path.exists(msm_makefile):
+              with open(msm_makefile) as f:
+                  content = f.read()
+              if "kasan_stub" not in content:
+                  with open(msm_makefile, 'a') as f:
+                      f.write("\n# KASAN flag stub for non-KASAN builds\n")
+                      f.write("obj-y += kasan_stub.o\n")
+                  print(f"  ✅ 已添加 kasan_stub.o 到 {msm_makefile}")
+              else:
+                  print(f"  ℹ️ {msm_makefile} 中已有 kasan_stub")
+
+          STUBEOF
+
+          echo "📋 验证 kasan_stub.c 内容:"
           cat common/lib/kasan_stub.c
+          echo ""
+          echo "📋 验证 common/lib/Makefile 末尾:"
+          tail -5 common/lib/Makefile
 
           echo "✅ ABI/KMI/DTC 已处理"
 
