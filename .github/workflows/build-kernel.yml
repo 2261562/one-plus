@@ -213,9 +213,18 @@ jobs:
                   content = fh.read()
               original = content
               for opt in strict_options:
-                  pattern = rf'({opt}\s*=\s*)True'
-                  if re.search(pattern, content):
-                      content = re.sub(pattern, rf'\1False', content)
+                  changed = False
+                  # 格式1: 字典键值对 "kmi_symbol_list_strict_mode": True
+                  p1 = rf'("{opt}"\s*:\s*)True'
+                  if re.search(p1, content):
+                      content = re.sub(p1, r'\1False', content)
+                      changed = True
+                  # 格式2: 函数参数赋值 kmi_symbol_list_strict_mode = True
+                  p2 = rf'({opt}\s*=\s*)True'
+                  if re.search(p2, content):
+                      content = re.sub(p2, r'\1False', content)
+                      changed = True
+                  if changed:
                       print(f"  ✅ {bzl_file}: {opt} True → False")
               if content != original:
                   with open(bzl_file, 'w') as fh:
@@ -224,7 +233,7 @@ jobs:
                   # 输出文件中已有的相关行（用于调试）
                   for i, line in enumerate(content.split('\n'), 1):
                       if any(opt in line for opt in strict_options):
-                          print(f"  ℹ️ {bzl_file} 行 {i}: {line.strip()}")
+                          print(f"  ⚠️ {bzl_file} 行 {i}: {line.strip()}")
           PYEOF
 
           echo "🔧 抑制 DTC 设备树编译器警告..."
