@@ -322,6 +322,40 @@ jobs:
             fi
           done
 
+          echo "🔧 注入 kasan_flag_enabled fallback 以修复未定义错误..."
+          python3 << 'PYEOF2'
+          import os, re
+
+          search_exts = ['.c', '.h']
+          # 匹配 extern bool kasan_flag_enabled(void); 及其变体，并且避免重复包装
+          pattern = r"(extern\s+bool\s+kasan_flag_enabled\s*\([^)]*\)\s*;)"
+          replacement = """#ifdef CONFIG_KASAN
+          \g<1>
+          #else
+          static inline bool kasan_flag_enabled(void) { return false; }
+          #endif"""
+
+          for root, dirs, files in os.walk('.'):
+              if '.git' in dirs: dirs.remove('.git')
+              for file in files:
+                  if any(file.endswith(ext) for ext in search_exts):
+                      filepath = os.path.join(root, file)
+                      try:
+                          with open(filepath, 'r', encoding='utf-8') as f:
+                              content = f.read()
+                          
+                          if 'kasan_flag_enabled' in content and 'extern bool' in content:
+                              # 避免在已经包了 #ifdef CONFIG_KASAN 的地方或者已经处理过的地方加上它
+                              if '#ifdef CONFIG_KASAN' not in content and 'static inline bool kasan_flag_enabled' not in content:
+                                  new_content = re.sub(pattern, replacement, content)
+                                  if new_content != content:
+                                      with open(filepath, 'w', encoding='utf-8') as f:
+                                          f.write(new_content)
+                                      print(f"  ✅ 已注入 fallback 到: {filepath}")
+                      except Exception as e:
+                          pass
+          PYEOF2
+
           echo "✅ ABI/KMI/DTC/KASAN 已处理"
 
       - name: 移除 -dirty 后缀
