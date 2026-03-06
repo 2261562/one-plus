@@ -278,11 +278,8 @@ jobs:
         run: |
           cd kernel_workspace/kernel_platform
           
-          # 创建根级 .bazelrc 确保所有 Bazel 调用都遵循此限制
+          # 创建根级 .bazelrc，纯靠资源限制防 OOM，不乱传未知的 LTO 参数
           cat <<EOF > .bazelrc
-          # 致命 OOM 修复：强制禁用 LTO
-          build --lto=none
-          
           # 严格限制并发和内存吃紧
           build --jobs=2
           build --local_ram_resources=5120
@@ -302,7 +299,7 @@ jobs:
           echo "🔨 开始编译内核..."
           mkdir -p "out/target/product/${{ github.event.inputs.CPUD }}"
 
-          # 启动内存监控，方便万一炸了排查
+          # 启动内存监控，方便排查
           (
             while true; do 
               TIMESTAMP=$(date +"%H:%M:%S")
@@ -315,17 +312,9 @@ jobs:
 
           # 彻底禁用 Ccache 防止磁盘写满爆炸
           export USE_CCACHE=0
-          export LTO=none
-          export DISABLE_LTO=1
-
-          # ==== KMI/ABI 终极解决办法 - 覆盖环境变量与 config ====
-          export TRIM_NONLISTED_KMI=0
-          export KMI_SYMBOL_LIST_STRICT_MODE=0
-          export KMI_SYMBOL_LIST_MODULE_GROUPING=0
-          # 强制修改所有可能包含 TRIM 宏的 build.config
-          find kernel_platform -name "build.config*" -type f -exec sed -i 's/TRIM_NONLISTED_KMI=1/TRIM_NONLISTED_KMI=0/g' {} + 2>/dev/null || true
-          find kernel_platform -name "build.config*" -type f -exec sed -i 's/KMI_SYMBOL_LIST_STRICT_MODE=1/KMI_SYMBOL_LIST_STRICT_MODE=0/g' {} + 2>/dev/null || true
           
+          # 【已移除】删除了 export LTO=none 相关的环境变量，避免构建脚本向 Bazel 传递毒药参数
+
           BUILD_LOG="/tmp/kernel_build.log"
           
           # 执行一加编译脚本
