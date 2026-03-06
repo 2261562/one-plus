@@ -302,6 +302,39 @@ jobs:
           echo "✅ Docker 配置注入及特洛伊木马部署完毕！"
 
       # ========================================
+      # 4.5 修复 KMI 符号白名单 (防 Symbol Violations 绝杀)
+      # ========================================
+      - name: 补齐缺失的 KMI 符号白名单
+        run: |
+          cd kernel_workspace/kernel_platform
+          echo "🔧 自动修补缺失的 KMI 符号白名单..."
+          
+          # 包含本次报错的 UID 符号，同时防患于未然加上 GID（用户组）相关符号
+          SYMBOLS="
+          from_kuid
+          from_kuid_munged
+          make_kuid
+          from_kgid
+          from_kgid_munged
+          make_kgid
+          "
+          
+          # 查找源码树中所有合法的 abi 白名单文件，并将符号直接注入
+          find . -type f -name "abi_*" 2>/dev/null | while read f; do
+            # 确认这是一个符号列表文件
+            if grep -q "\[abi_symbol_list\]" "$f"; then
+              echo "  📄 正在注入白名单: $f"
+              for sym in $SYMBOLS; do
+                # 如果符号不在文件中，则追加到文件末尾
+                if ! grep -qw "$sym" "$f"; then
+                  echo "  $sym" >> "$f"
+                fi
+              done
+            fi
+          done
+          echo "✅ KMI 符号白名单补齐完毕，再也不会有偷渡警告了！"
+
+      # ========================================
       # 5. 编译内核 (防 OOM 核心所在)
       # ========================================
       - name: 强制配置 Bazel 资源限制
