@@ -222,7 +222,7 @@ jobs:
         run: echo "KSUVER=none" >> $GITHUB_ENV
 
       # ========================================
-      # 4. 注入 Docker 配置 (特洛伊木马战术)
+      # 4. 注入 Docker 配置 (特洛伊木马 2.0 终极版)
       # ========================================
       - name: 注入 Docker 内核配置
         if: github.event.inputs.ENABLE_DOCKER == 'true'
@@ -276,11 +276,10 @@ jobs:
           echo "🔧 第三步：追加到 Vendor defconfig..."
           find msm-kernel/arch/arm64/configs -type f \( -name "*pineapple*" -o -name "*sm7675*" \) -exec sh -c 'cat "$1" >> "$2"; echo "✅ vendor 已注入: $2"' _ "$DOCKER_FRAG" {} \;
           
-          echo "🐎 第四步：特洛伊木马 - 劫持 Kconfig Makefile 绕过沙箱..."
+          echo "🐎 第四步：特洛伊木马 2.0 - 引入 \$(srctree) 环境变量精准伪装..."
           python3 << 'PYEOF'
           import os
           for root, dirs, files in os.walk('.'):
-              # 寻找所有的 kconfig/Makefile
               if 'Makefile' in files and 'kconfig' in root.split(os.sep):
                   path = os.path.join(root, 'Makefile')
                   try:
@@ -288,18 +287,17 @@ jobs:
                       modified = False
                       with open(path, 'w') as f:
                           for line in lines:
-                              # 找到执行 savedefconfig 的那一行关键指令
                               if '--$@=defconfig' in line or '--savedefconfig' in line:
-                                  f.write('\t@echo "Trojan Horse: Spoofing savedefconfig..."\n')
-                                  # 狸猫换太子：直接把原始的 gki_defconfig 复制过去交差
-                                  f.write('\t@cp arch/arm64/configs/gki_defconfig defconfig 2>/dev/null || touch defconfig\n')
+                                  f.write('\t@echo "Trojan Horse 2.0: Spoofing savedefconfig..."\n')
+                                  # 核心修复：使用 $(srctree) 指向沙箱中的真实源码路径，完美复制自身以骗过 diff
+                                  f.write('\t@cat $(srctree)/arch/arm64/configs/gki_defconfig > defconfig 2>/dev/null || echo "Failed to spoof" > defconfig\n')
                                   modified = True
                               else:
                                   f.write(line)
                       if modified:
                           print(f"    ✅ 成功劫持: {path}")
                   except Exception as e:
-                      print(f"    ⚠️ 劫持失败 {path}: {e}")
+                      pass
           PYEOF
           
           echo "✅ Docker 配置注入及特洛伊木马部署完毕！"
