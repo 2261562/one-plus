@@ -203,12 +203,31 @@ jobs:
         if: github.event.inputs.ENABLE_DOCKER == 'true'
         run: |
           cd kernel_workspace/kernel_platform
-          # ⚠️ 不修改 gki_defconfig！Kleaf 对 GKI defconfig 有严格一致性检查，
-          # 添加不支持的选项会导致 KernelConfig 阶段构建失败。
-          # GKI 已默认启用: NAMESPACES, NET_NS, UTS_NS, CGROUPS, CGROUP_CPUACCT,
-          # CGROUP_FREEZER, CGROUP_SCHED, CPUSETS, MEMCG, CGROUP_BPF, VETH, BRIDGE,
-          # IP_NF_NAT, NF_NAT, OVERLAY_FS, FAIR_GROUP_SCHED 等。
-          # 只在 vendor defconfig 追加额外模块级配置。
+          # ==========================================
+          # 注入 GKI 核心配置 (vmlinux 需要的核心级别功能)
+          # ==========================================
+          GKI_CONF="docker_gki.conf"
+          {
+            echo "# Docker/Container Support - GKI Core Configs"
+            echo "CONFIG_PID_NS=y"
+            echo "CONFIG_IPC_NS=y"
+            echo "CONFIG_UTS_NS=y"
+            echo "CONFIG_USER_NS=y"
+            echo "CONFIG_CGROUP_DEVICE=y"
+            echo "CONFIG_CGROUP_NET_CLASSID=y"
+            echo "CONFIG_CGROUP_NET_PRIO=y"
+            echo "CONFIG_CGROUP_PERF=y"
+          } > "$GKI_CONF"
+          echo "📋 GKI 配置片段 (PID_NS等核心功能):"
+          cat "$GKI_CONF"
+          echo "🔍 注入到 gki_defconfig..."
+          echo "" >> common/arch/arm64/configs/gki_defconfig
+          cat "$GKI_CONF" >> common/arch/arm64/configs/gki_defconfig
+          echo "  ✅ 已注入: common/arch/arm64/configs/gki_defconfig"
+
+          # ==========================================
+          # 注入 Vendor 模块配置
+          # ==========================================
           DOCKER_CONF="docker_vendor.conf"
           {
             echo "# Docker/Container Support - Vendor Configs"
@@ -230,7 +249,7 @@ jobs:
           } > "$DOCKER_CONF"
           echo "📋 Vendor 配置片段:"
           cat "$DOCKER_CONF"
-          echo "🔍 注入到 vendor defconfig（不动 gki_defconfig）..."
+          echo "🔍 注入到 vendor defconfig..."
           find msm-kernel/arch/arm64/configs -type f \( -name "*pineapple*" -o -name "*sm7675*" \) -exec sh -c 'echo "" >> "$1"; cat docker_vendor.conf >> "$1"; echo "  ✅ 已注入: $1"' _ {} \;
           echo "✅ Docker 配置注入完成"
       # ========================================
