@@ -58,13 +58,13 @@ on:
         default: false
 
       APPLY_CUSTOM_DEFCONFIG:
-        description: "应用自定义内核配置"
+        description: "应用自定义内核配置（config/custom_defconfig.fragment）"
         required: true
         type: boolean
         default: false
 
       ENABLE_DOCKER:
-        description: "开启 Docker/容器 支持"
+        description: "开启 Docker/容器 支持（内核配置）"
         required: true
         type: boolean
         default: true
@@ -77,7 +77,7 @@ jobs:
 
     steps:
       # ========================================
-      # 1. 准备构建环境 (榨干 GitHub Actions 性能)
+      # 1. 准备构建环境
       # ========================================
       - name: 最大化构建空间
         uses: easimon/maximize-build-space@master
@@ -97,24 +97,31 @@ jobs:
           sudo rm -rf /usr/local/share/chromium /usr/local/share/powershell
           sudo apt-get autoremove -y || true
           sudo apt-get clean || true
+          echo "📊 清理后可用空间:"
           df -h /
-
       - name: 配置 Swap 分区
         run: |
           echo "🔍 正在清理残留 Docker 数据..."
           sudo docker image prune -a -f || true
           
-          # 动态分配合理的 Swap，防止 OOM
           FREE_SPACE=$(df -BG / | tail -1 | awk '{print $4}' | sed 's/G//')
-          if [ "$FREE_SPACE" -gt 30 ]; then SWAP_SIZE="12G"; elif [ "$FREE_SPACE" -gt 20 ]; then SWAP_SIZE="10G"; else SWAP_SIZE="8G"; fi
-
-          echo "🔍 创建 Swap 文件 ($SWAP_SIZE)..."
-          sudo fallocate -l $SWAP_SIZE /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          echo "📊 当前根目录可用空间: ${FREE_SPACE}GB"
+          if [ "$FREE_SPACE" -gt 30 ]; then
+            SWAP_SIZE="8G"
+          elif [ "$FREE_SPACE" -gt 20 ]; then
+            SWAP_SIZE="6G"
+          else
+            SWAP_SIZE="4G"
+          fi
+          echo "🔍 正在尝试创建 Swap 文件 ($SWAP_SIZE)..."
+          sudo fallocate -l $SWAP_SIZE /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=4096
+          
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
+          echo "✅ Swap 配置完成:"
           free -h
-
+          df -h /
       - name: 检出仓库
         uses: actions/checkout@v4
 
@@ -122,87 +129,56 @@ jobs:
         run: |
           git config --global user.name "kernel-builder"
           git config --global user.email "builder@github.actions"
-
       - name: 安装依赖
         run: |
           sudo apt-get update
-          # 注意：移除了 ccache，CI 环境开 ccache 纯属浪费 IO 和磁盘空间
           sudo apt-get install -y --no-install-recommends \
             python3 python-is-python3 git curl wget \
-            bc bison build-essential flex \
+            bc bison build-essential ccache flex \
             libelf-dev libssl-dev libncurses-dev \
             zip unzip cpio procps htop
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
-
       - name: 安装 repo 工具
         run: |
           curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
           chmod a+x ~/repo
           sudo mv ~/repo /usr/local/bin/repo
-
       # ========================================
       # 2. 拉取内核源码
       # ========================================
       - name: 初始化并同步内核源码
         run: |
           mkdir kernel_workspace && cd kernel_workspace
+          echo "::group::repo init"
           repo init \
             -u https://github.com/OnePlusOSS/kernel_manifest.git \
             -b refs/heads/oneplus/${{ github.event.inputs.MANIFEST_BRANCH }} \
             -m ${{ github.event.inputs.MANIFEST_XML }}.xml \
             --depth=1 \
             --repo-url=https://github.com/GerritCodeReview/git-repo.git
-          
+          echo "::endgroup::"
+          echo "::group::repo sync"
           repo sync -c -j$(nproc) --no-tags --no-clone-bundle --optimized-fetch
+          echo "::endgroup::"
+          echo "📋 生成 project.list（Bazel workspace status 依赖此文件）..."
           repo list -f > project.list 2>/dev/null || repo list > project.list 2>/dev/null || echo "." > project.list
+          echo "🗑️ 清理 .repo 目录..."
           rm -rf .repo
+          echo "🗑️ 清理源码中的 .git 目录..."
           find . -mindepth 2 -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
+          echo "📊 清理后可用空间:"
           df -h /
-
-      - name: 破除 KMI 严格检查与 ABI 限制 (防报错神药)
+      - name: 清理 ABI 保护导出（防止编译报错）
         run: |
-          cd kernel_workspace/kernel_platform
-
-          echo "🧹 清理 ABI protected exports..."
-          rm -f common/android/abi_gki_protected_exports_* || true
-          rm -f msm-kernel/android/abi_gki_protected_exports_* || true
-
-          echo "🧹 禁用 KMI/ABI 严格检查 (关键绕过)..."
-          python3 << 'PYEOF'
-          import re, os, glob
-          bzl_files = glob.glob("**/BUILD.bazel", recursive=True)
-          strict_options = ["kmi_symbol_list_strict_mode", "trim_nonlisted_kmi"]
-          for bzl_file in bzl_files:
-              if not os.path.exists(bzl_file): continue
-              with open(bzl_file) as fh: content = fh.read()
-              original = content
-
-              # 先打印文件中所有包含目标选项的行（调试用）
-              for i, line in enumerate(content.split('\n'), 1):
-                  for opt in strict_options:
-                      if opt in line:
-                          print(f"  🔍 {bzl_file} 行 {i}: {line.strip()}")
-
-              for opt in strict_options:
-                  pattern = rf'({opt}\s*=\s*)True'
-                  if re.search(pattern, content):
-                      content = re.sub(pattern, rf'\1False', content)
-              if content != original:
-                  with open(bzl_file, 'w') as fh: fh.write(content)
-                  print(f"✅ 已修改 {bzl_file}")
-          PYEOF
-
-          echo "🔧 抑制 DTC 警告..."
-          export DTC_FLAGS="-Wno-unique_unit_address -Wno-interrupt_provider -Wno-graph_child_address"
-          echo "DTC_FLAGS='$DTC_FLAGS'" >> $GITHUB_ENV
-
+          cd kernel_workspace
+          rm -f kernel_platform/common/android/abi_gki_protected_exports_* || true
+          rm -f kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || true
       - name: 移除 -dirty 后缀
         run: |
           cd kernel_workspace
           sed -i 's/ -dirty//g' kernel_platform/common/scripts/setlocalversion
           sed -i 's/ -dirty//g' kernel_platform/msm-kernel/scripts/setlocalversion
-
       # ========================================
       # 3. 集成 KernelSU Next
       # ========================================
@@ -216,151 +192,64 @@ jobs:
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
           echo "✅ KernelSU Next 版本: $KSU_VERSION"
           sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
-
       - name: 设置 KSU 版本（未启用时）
         if: github.event.inputs.KERNELSU_ENABLED != 'true'
         run: echo "KSUVER=none" >> $GITHUB_ENV
 
       # ========================================
-      # 4. 注入 Docker 配置 (特洛伊木马 2.0 终极版)
+      # 4. 自定义内核修改 (注入 Docker 灵魂核心)
       # ========================================
       - name: 注入 Docker 内核配置
         if: github.event.inputs.ENABLE_DOCKER == 'true'
         run: |
           cd kernel_workspace/kernel_platform
-          
-          DOCKER_FRAG="docker_config.fragment"
-          cat <<EOF > "$DOCKER_FRAG"
-          CONFIG_PID_NS=y
-          CONFIG_IPC_NS=y
-          CONFIG_USER_NS=y
-          CONFIG_CGROUP_DEVICE=y
-          CONFIG_CGROUP_PIDS=y
-          CONFIG_CGROUP_PERF=y
-          CONFIG_NET_CLS_CGROUP=y
-          CONFIG_CFS_BANDWIDTH=y
-          CONFIG_BRIDGE_NETFILTER=y
-          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
-          CONFIG_NETFILTER_XT_MATCH_IPVS=y
-          CONFIG_IP6_NF_NAT=y
-          CONFIG_IP6_NF_TARGET_MASQUERADE=y
-          CONFIG_IP_VS=y
-          CONFIG_IP_VS_NFCT=y
-          CONFIG_IP_VS_PROTO_TCP=y
-          CONFIG_IP_VS_PROTO_UDP=y
-          CONFIG_IP_VS_RR=y
-          CONFIG_MACVLAN=y
-          CONFIG_IPVLAN=y
-          CONFIG_VXLAN=y
-          CONFIG_DUMMY=y
-          CONFIG_POSIX_MQUEUE=y
-          CONFIG_SYSVIPC=y
-          EOF
-
-          GKI_DEFCONFIG=$(find common/arch/arm64/configs -name "gki_defconfig" -type f | head -1)
-          
-          echo "🧹 第一步：净化冲突的原有配置..."
-          while read -r line; do
-              if [ -z "$line" ] || [[ "$line" == "#"* ]]; then continue; fi
-              KEY=$(echo "$line" | cut -d= -f1)
-              sed -i "/^# ${KEY} is not set/d" "$GKI_DEFCONFIG"
-              sed -i "/^${KEY}=/d" "$GKI_DEFCONFIG"
-          done < "$DOCKER_FRAG"
-
-          echo "🔧 第二步：安全追加 Docker 配置..."
-          echo "" >> "$GKI_DEFCONFIG"
-          echo "# Docker Container Support" >> "$GKI_DEFCONFIG"
-          cat "$DOCKER_FRAG" >> "$GKI_DEFCONFIG"
-
-          echo "🔧 第三步：追加到 Vendor defconfig..."
-          find msm-kernel/arch/arm64/configs -type f \( -name "*pineapple*" -o -name "*sm7675*" \) -exec sh -c 'cat "$1" >> "$2"; echo "✅ vendor 已注入: $2"' _ "$DOCKER_FRAG" {} \;
-          
-          echo "🐎 第四步：特洛伊木马 2.0 - 引入 \$(srctree) 环境变量精准伪装..."
-          python3 << 'PYEOF'
-          import os
-          for root, dirs, files in os.walk('.'):
-              if 'Makefile' in files and 'kconfig' in root.split(os.sep):
-                  path = os.path.join(root, 'Makefile')
-                  try:
-                      with open(path, 'r') as f: lines = f.readlines()
-                      modified = False
-                      with open(path, 'w') as f:
-                          for line in lines:
-                              if '--$@=defconfig' in line or '--savedefconfig' in line:
-                                  f.write('\t@echo "Trojan Horse 2.0: Spoofing savedefconfig..."\n')
-                                  # 核心修复：使用 $(srctree) 指向沙箱中的真实源码路径，完美复制自身以骗过 diff
-                                  f.write('\t@cat $(srctree)/arch/arm64/configs/gki_defconfig > defconfig 2>/dev/null || echo "Failed to spoof" > defconfig\n')
-                                  modified = True
-                              else:
-                                  f.write(line)
-                      if modified:
-                          print(f"    ✅ 成功劫持: {path}")
-                  except Exception as e:
-                      pass
-          PYEOF
-          
-          echo "✅ Docker 配置注入及特洛伊木马部署完毕！"
-
+          # ⚠️ 不修改 gki_defconfig！Kleaf 对 GKI defconfig 有严格一致性检查，
+          # 添加不支持的选项会导致 KernelConfig 阶段构建失败。
+          # GKI 已默认启用: NAMESPACES, NET_NS, UTS_NS, CGROUPS, CGROUP_CPUACCT,
+          # CGROUP_FREEZER, CGROUP_SCHED, CPUSETS, MEMCG, CGROUP_BPF, VETH, BRIDGE,
+          # IP_NF_NAT, NF_NAT, OVERLAY_FS, FAIR_GROUP_SCHED 等。
+          # 只在 vendor defconfig 追加额外模块级配置。
+          DOCKER_CONF="docker_vendor.conf"
+          {
+            echo "# Docker/Container Support - Vendor Configs"
+            echo "CONFIG_BRIDGE_NETFILTER=y"
+            echo "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y"
+            echo "CONFIG_NETFILTER_XT_MATCH_IPVS=y"
+            echo "CONFIG_IP6_NF_NAT=y"
+            echo "CONFIG_IP6_NF_TARGET_MASQUERADE=y"
+            echo "CONFIG_IP_VS=y"
+            echo "CONFIG_IP_VS_NFCT=y"
+            echo "CONFIG_IP_VS_PROTO_TCP=y"
+            echo "CONFIG_IP_VS_PROTO_UDP=y"
+            echo "CONFIG_IP_VS_RR=y"
+            echo "CONFIG_MACVLAN=y"
+            echo "CONFIG_IPVLAN=y"
+            echo "CONFIG_VXLAN=y"
+            echo "CONFIG_DUMMY=y"
+            echo "CONFIG_POSIX_MQUEUE=y"
+          } > "$DOCKER_CONF"
+          echo "📋 Vendor 配置片段:"
+          cat "$DOCKER_CONF"
+          echo "🔍 注入到 vendor defconfig（不动 gki_defconfig）..."
+          find msm-kernel/arch/arm64/configs -type f \( -name "*pineapple*" -o -name "*sm7675*" \) -exec sh -c 'echo "" >> "$1"; cat docker_vendor.conf >> "$1"; echo "  ✅ 已注入: $1"' _ {} \;
+          echo "✅ Docker 配置注入完成"
       # ========================================
-      # 4.5 修复 KMI 符号白名单 (外科手术级精准注入)
+      # 5. 编译内核
       # ========================================
-      - name: 补齐缺失的 KMI 符号白名单
+      - name: 配置 Bazel 优化参数
         run: |
           cd kernel_workspace/kernel_platform
-          echo "🔧 精准注入缺失的 KMI 符号白名单..."
-          
-          # 定义需要注入的符号，严格保持 INI 格式需要的两个空格缩进
-          INJECT_SYMS="  from_kuid\n  from_kuid_munged\n  make_kuid\n  from_kgid\n  from_kgid_munged\n  make_kgid"
-          
-          # 遍历所有的 abi 文件
-          find . -type f -name "abi_*" 2>/dev/null | while read f; do
-            # 只有当文件确实包含 [abi_symbol_list] 头部时才处理
-            if grep -q "\[abi_symbol_list\]" "$f"; then
-              echo "  📄 正在精准修补: $f"
-              # 使用 awk 在匹配到 [abi_symbol_list] 的下一行立刻安全插入我们的符号
-              awk -v syms="$INJECT_SYMS" '
-                { print $0 }
-                /^\[abi_symbol_list\]/ {
-                  if (!done) {
-                    printf "%s\n", syms
-                    done = 1
-                  }
-                }
-              ' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
-            fi
-          done
-          
-          echo "✅ KMI 符号精准修补完毕，Python 解析器不会再崩溃了！"
-
-      # ========================================
-      # 5. 编译内核 (防 OOM 核心所在)
-      # ========================================
-      - name: 强制配置 Bazel 资源限制
-        run: |
-          cd kernel_workspace/kernel_platform
-          
-          # 创建根级 .bazelrc，纯靠资源限制防 OOM，不乱传未知的 LTO 参数
-          cat <<EOF > .bazelrc
-          # 严格限制并发和内存吃紧
-          build --jobs=2
-          build --local_ram_resources=5120
-          build --local_cpu_resources=2
-          build --worker_max_instances=1
-          
-          # 降低 Java 堆内存占用
-          startup --host_jvm_args=-Xmx2g
-          EOF
-          
-          echo "📋 Bazel 全局限制已生效:"
-          cat .bazelrc
-
+          {
+            echo "build --reuse_sandbox_directories"
+            echo "build --experimental_sandbox_async_tree_delete_idle_threads=0"
+            echo "build --jobs=4"
+            echo "build --verbose_failures"
+          } > user.bazelrc
       - name: 编译内核
         run: |
           cd kernel_workspace
           echo "🔨 开始编译内核..."
           mkdir -p "out/target/product/${{ github.event.inputs.CPUD }}"
-
-          # 启动内存监控，方便排查
           (
             while true; do 
               TIMESTAMP=$(date +"%H:%M:%S")
@@ -370,33 +259,17 @@ jobs:
             done
           ) &
           MON_PID=$!
-
-          # 彻底禁用 Ccache 防止磁盘写满爆炸
-          export USE_CCACHE=0
+          export PATH="/usr/lib/ccache:$PATH"
+          export USE_CCACHE=1
+          export CCACHE_EXEC=/usr/bin/ccache
+          export CCACHE_DIR="/home/runner/.ccache"
+          export LTO=none
+          export MAKEFLAGS="-j$(nproc)"
           
-          # 【已移除】删除了 export LTO=none 相关的环境变量，避免构建脚本向 Bazel 传递毒药参数
-
-          BUILD_LOG="/tmp/kernel_build.log"
-          
-          # 执行一加编译脚本
-          stdbuf -oL ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} gki 2>&1 | tee "$BUILD_LOG"
-          STATUS=${PIPESTATUS[0]}
-
+          stdbuf -oL ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} gki
+          STATUS=$?
           kill $MON_PID 2>/dev/null || true
-
-          if [ $STATUS -ne 0 ]; then
-            echo ""
-            echo "========================================"
-            echo "❌ 构建失败！以下是最后 150 行日志："
-            echo "========================================"
-            tail -150 "$BUILD_LOG"
-            echo "========================================"
-            echo "🔍 搜索关键错误信息："
-            grep -iE '(^ERROR|FAILED|fatal|undefined|OOM|Killed)' "$BUILD_LOG" | tail -30 || echo "未找到明显错误关键词"
-          fi
-
           exit $STATUS
-
       # ========================================
       # 6. 打包产物
       # ========================================
@@ -404,42 +277,36 @@ jobs:
         run: |
           DIST_DIR="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist"
           if [ ! -f "$DIST_DIR/Image" ]; then
-            echo "❌ 未找到编译好的 Image 文件，打包终止！"
             exit 1
           fi
           echo "✅ 内核 Image 编译成功"
-
       - name: 生成构建信息
         run: |
           BUILD_DATE=$(date -u +"%Y%m%d_%H%M%S")
           echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
           cat << EOF > build_info.txt
-          OnePlus ACE 3V Kernel
+          OnePlus ACE 3V Kernel (Docker Enabled)
           =================================
           构建时间: $BUILD_DATE (UTC)
-          设备: OnePlus ACE 3V (pineapple)
-          KernelSU Next: ${{ github.event.inputs.KERNELSU_ENABLED }} (v${{ env.KSUVER }})
-          Docker 支持: ${{ github.event.inputs.ENABLE_DOCKER }}
-          LTO 状态: Disabled (Performance & Build Fix)
+          设备: OnePlus ACE 3V
+          KernelSU: ${{ github.event.inputs.KERNELSU_ENABLED }} (v${{ env.KSUVER }})
+          Docker 支持: 强行注入开启
           EOF
-
       - name: 打包 AnyKernel3
         run: |
           git clone https://github.com/Kernel-SU/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
-
           DIST_DIR="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist"
           cp "$DIST_DIR/Image" ./AnyKernel3/
           if [ -f "$DIST_DIR/dtbo.img" ]; then
             cp "$DIST_DIR/dtbo.img" ./AnyKernel3/
           fi
           cp build_info.txt ./AnyKernel3/
-
+          # 🚀 自动修复 AnyKernel3 的 init_boot 指向
           echo "⚙️ 正在修改 anykernel.sh 以适配一加 GKI 分区..."
           sed -i 's/block=boot;/block=init_boot;/g' ./AnyKernel3/anykernel.sh
           
-          echo "✅ AnyKernel3 打包准备就绪"
-
+          echo "✅ AnyKernel3 打包完成"
       # ========================================
       # 7. 上传产物
       # ========================================
