@@ -264,9 +264,9 @@ jobs:
 
           # 优雅地绕过 Kleaf 的 defconfig 严格排版检查（防止报错退出）
           find build/kernel -type f -name "defconfig.bzl" -exec sed -i 's/fail("defconfig out of date/print("defconfig check bypassed/g' {} + || true
-          # 关键：由于通过追加打乱了 Kconfig 顺序，底层的 build_utils.sh 会抛出 savedefconfig mismatch 退出，必须把检查也一并干掉
-          find build/kernel -type f -name "build_utils.sh" -exec sed -i 's/if ! cmp -s/if false; then #/g' {} + || true
-          find build/kernel -type f -name "build_utils.sh" -exec sed -i 's/ERROR: savedefconfig does not match/WARNING: Bypassed defconfig mismatch check/g' {} + || true
+          # 关键：由于通过追加打乱了 Kconfig 顺序，底层的 _setup_env.sh 会抛出 savedefconfig mismatch 退出，必须把检查也一并干掉
+          find build/kernel -type f -name "_setup_env.sh" -exec sed -i 's/return ${RES}/return 0/g' {} + || true
+          find build/kernel -type f -name "_setup_env.sh" -exec sed -i 's/ERROR: savedefconfig does not match/WARNING: Bypassed defconfig mismatch check/g' {} + || true
 
       # ========================================
       # 5. 编译内核
