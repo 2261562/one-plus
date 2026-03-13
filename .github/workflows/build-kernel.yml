@@ -341,14 +341,24 @@ jobs:
           KernelSU: ${{ github.event.inputs.KERNELSU_ENABLED }} (v${{ env.KSUVER }})
           Docker 支持: 强行注入开启
           EOF
-      - name: 打包 AnyKernel3
+      - name: 清理空间并打包 AnyKernel3
         run: |
+          DIST_DIR="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist"
+          echo "🧹 正在清理 Bazel 缓存与内核源码释放硬盘空间..."
+          mkdir -p /tmp/kernel_artifacts
+          cp "$DIST_DIR/Image" /tmp/kernel_artifacts/
+          if [ -f "$DIST_DIR/dtbo.img" ]; then
+            cp "$DIST_DIR/dtbo.img" /tmp/kernel_artifacts/
+          fi
+          rm -rf kernel_workspace
+          df -h /
+          
+          echo "📦 正在拉取 AnyKernel3..."
           git clone https://github.com/Kernel-SU/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
-          DIST_DIR="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist"
-          cp "$DIST_DIR/Image" ./AnyKernel3/
-          if [ -f "$DIST_DIR/dtbo.img" ]; then
-            cp "$DIST_DIR/dtbo.img" ./AnyKernel3/
+          cp /tmp/kernel_artifacts/Image ./AnyKernel3/
+          if [ -f "/tmp/kernel_artifacts/dtbo.img" ]; then
+            cp /tmp/kernel_artifacts/dtbo.img ./AnyKernel3/
           fi
           cp build_info.txt ./AnyKernel3/
           
