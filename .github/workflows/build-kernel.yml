@@ -322,13 +322,23 @@ jobs:
       # ========================================
       # 6. 打包产物
       # ========================================
-      - name: 验证编译产物
+      - name: 验证编译产物并清理空间
         run: |
           DIST_DIR="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist"
           if [ ! -f "$DIST_DIR/Image" ]; then
             exit 1
           fi
           echo "✅ 内核 Image 编译成功"
+          
+          echo "🧹 正在清理 Bazel 缓存与内核源码释放硬盘空间..."
+          mkdir -p /tmp/kernel_artifacts
+          cp "$DIST_DIR/Image" /tmp/kernel_artifacts/
+          if [ -f "$DIST_DIR/dtbo.img" ]; then
+            cp "$DIST_DIR/dtbo.img" /tmp/kernel_artifacts/
+          fi
+          rm -rf kernel_workspace
+          df -h /
+          
       - name: 生成构建信息
         run: |
           BUILD_DATE=$(date -u +"%Y%m%d_%H%M%S")
@@ -341,18 +351,8 @@ jobs:
           KernelSU: ${{ github.event.inputs.KERNELSU_ENABLED }} (v${{ env.KSUVER }})
           Docker 支持: 强行注入开启
           EOF
-      - name: 清理空间并打包 AnyKernel3
+      - name: 打包 AnyKernel3
         run: |
-          DIST_DIR="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-gki/dist"
-          echo "🧹 正在清理 Bazel 缓存与内核源码释放硬盘空间..."
-          mkdir -p /tmp/kernel_artifacts
-          cp "$DIST_DIR/Image" /tmp/kernel_artifacts/
-          if [ -f "$DIST_DIR/dtbo.img" ]; then
-            cp "$DIST_DIR/dtbo.img" /tmp/kernel_artifacts/
-          fi
-          rm -rf kernel_workspace
-          df -h /
-          
           echo "📦 正在拉取 AnyKernel3..."
           git clone https://github.com/Kernel-SU/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
