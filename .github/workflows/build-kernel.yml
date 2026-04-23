@@ -252,32 +252,27 @@ jobs:
         if: github.event.inputs.ENABLE_DOCKER == 'true'
         run: |
           cd kernel_workspace/kernel_platform
-          DOCKER_FRAGMENT="${GITHUB_WORKSPACE}/config/docker_defconfig.fragment"
-          if [ -f "$DOCKER_FRAGMENT" ]; then
-            echo "🐳 应用 Docker 内核配置 fragment..."
-            # 查找 vendor defconfig 并追加 Docker 相关配置
-            DEFCONFIG_DIR="msm-kernel/arch/arm64/configs"
-            VENDOR_DEFCONFIG=$(find "$DEFCONFIG_DIR" -name "*pineapple*" -o -name "*sm7675*" | head -1)
-            if [ -n "$VENDOR_DEFCONFIG" ]; then
-              echo "" >> "$VENDOR_DEFCONFIG"
-              echo "# Docker/Container Support" >> "$VENDOR_DEFCONFIG"
-              cat "$DOCKER_FRAGMENT" >> "$VENDOR_DEFCONFIG"
-              echo "✅ Docker 配置已追加到: $VENDOR_DEFCONFIG"
-            else
-              echo "⚠️ 未找到 vendor defconfig，尝试追加到 common gki_defconfig"
-              GKI_DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
-              if [ -f "$GKI_DEFCONFIG" ]; then
-                echo "" >> "$GKI_DEFCONFIG"
-                echo "# Docker/Container Support" >> "$GKI_DEFCONFIG"
-                cat "$DOCKER_FRAGMENT" >> "$GKI_DEFCONFIG"
-                echo "✅ Docker 配置已追加到: $GKI_DEFCONFIG"
-              fi
-            fi
-            cd msm-kernel && git add -A && git commit -m "Enable Docker support" || true
-            cd ../common && git add -A && git commit -m "Enable Docker support" || true
-          else
-            echo "⚠️ config/docker_defconfig.fragment 不存在，跳过"
+          DOCKER_DEFCONFIG="${GITHUB_WORKSPACE}/config/current_defconfig"
+
+          if [ ! -f "$DOCKER_DEFCONFIG" ]; then
+            echo "⚠️ config/current_defconfig 不存在，跳过"
+            exit 0
           fi
+
+          echo "🐳 直接使用完整 Docker 内核配置..."
+
+          # 直接替换 gki_defconfig — 构建系统会用这份完整配置作为基础
+          GKI_DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
+          if [ -f "$GKI_DEFCONFIG" ]; then
+            cp "$DOCKER_DEFCONFIG" "$GKI_DEFCONFIG"
+            echo "✅ 已替换 gki_defconfig ($(wc -l < "$GKI_DEFCONFIG") 行)"
+          else
+            echo "❌ 未找到 gki_defconfig: $GKI_DEFCONFIG"
+            exit 1
+          fi
+
+          # 提交修改（Kleaf 需要干净的 git 状态）
+          cd common && git add -A && git commit -m "Replace gki_defconfig with Docker-enabled config" || true
       - name: 应用自定义 defconfig fragment
         if: github.event.inputs.APPLY_CUSTOM_DEFCONFIG == 'true'
         run: |
