@@ -359,7 +359,71 @@ jobs:
           ccache -s
           kill $MON_PID 2>/dev/null || true
           exit $STATUS
-      # ========================================
+      - name: 导出构建错误日志
+        if: failure()
+        run: |
+          cd kernel_workspace/kernel_platform
+          echo "=========================================="
+          echo "📋 收集构建错误日志..."
+          echo "=========================================="
+
+          # 1. Bazel 错误日志
+          echo ""
+          echo "--- Bazel command.log ---"
+          BAZEL_OUTPUT=$(find out/bazel -name "command.log" 2>/dev/null | head -1)
+          if [ -n "$BAZEL_OUTPUT" ]; then
+            tail -200 "$BAZEL_OUTPUT"
+          else
+            echo "(未找到 command.log)"
+          fi
+
+          # 2. KernelConfig 相关日志
+          echo ""
+          echo "--- KernelConfig 错误日志 ---"
+          find out/bazel -path "*kernel_aarch64_config*" -name "*.log" 2>/dev/null | while read f; do
+            echo "=== $f ==="
+            tail -100 "$f"
+          done
+
+          # 3. 查找 sandbox 中的错误输出
+          echo ""
+          echo "--- Sandbox stderr ---"
+          find out/bazel -path "*kernel_aarch64_config*" -name "stderr" 2>/dev/null | while read f; do
+            echo "=== $f ==="
+            cat "$f"
+          done
+
+          # 4. 检查 .config 生成情况
+          echo ""
+          echo "--- 查找已生成的 .config ---"
+          find out -name ".config" -type f 2>/dev/null | head -5
+
+          # 5. 当前 gki_defconfig 状态
+          echo ""
+          echo "--- gki_defconfig 行数和头部 ---"
+          GKI="common/arch/arm64/configs/gki_defconfig"
+          if [ -f "$GKI" ]; then
+            wc -l "$GKI"
+            head -20 "$GKI"
+          fi
+
+          # 6. Bazel server 日志
+          echo ""
+          echo "--- Bazel server jvm.out (尾部) ---"
+          find out/bazel -name "jvm.out" 2>/dev/null | while read f; do
+            echo "=== $f ==="
+            tail -50 "$f"
+          done
+      - name: 上传错误日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-error-logs
+          path: |
+            kernel_workspace/kernel_platform/out/bazel/**/command.log
+            kernel_workspace/kernel_platform/out/bazel/**/*kernel_aarch64_config*
+          retention-days: 3
+          if-no-files-found: warn
       # 6. 打包产物
       # ========================================
       - name: 验证编译产物
