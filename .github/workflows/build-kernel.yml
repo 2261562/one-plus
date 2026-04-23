@@ -306,6 +306,9 @@ jobs:
             echo "# 限制并行任务数，防止 CI 环境资源争用"
             echo "build --jobs=4"
             echo ""
+            echo "# === 跳过 KMI 符号校验（自定义配置会引入新符号）==="
+            echo "build --nokmi_symbol_list_strict_mode"
+            echo ""
             echo "# === 调试辅助 ==="
             echo "build --verbose_failures"
           } > user.bazelrc
