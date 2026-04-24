@@ -321,6 +321,8 @@ jobs:
             echo "" >> user.bazelrc
             echo "# === Docker 内核配置 fragment ===" >> user.bazelrc
             echo "build --defconfig_fragment=//common:docker.fragment" >> user.bazelrc
+            echo "# Docker 会引入额外 in-tree 模块；先允许未声明模块通过，避免被 Kleaf 的 module_outs 检查直接中断" >> user.bazelrc
+            echo "build --allow_undeclared_modules" >> user.bazelrc
             echo "🐳 已添加 --defconfig_fragment 到 user.bazelrc"
           fi
           echo "✅ user.bazelrc 已写入:"
@@ -384,10 +386,10 @@ jobs:
             echo "(未找到 command.log)"
           fi
 
-          # 2. KernelConfig 相关日志
+          # 2. KernelConfig / KernelBuild 相关日志
           echo ""
-          echo "--- KernelConfig 错误日志 ---"
-          find out/bazel -path "*kernel_aarch64_config*" -name "*.log" 2>/dev/null | while read f; do
+          echo "--- KernelConfig / KernelBuild 错误日志 ---"
+          find out/bazel \( -path "*kernel_aarch64_config*" -o -path "*kernel_aarch64*" \) -name "*.log" 2>/dev/null | while read f; do
             echo "=== $f ==="
             tail -100 "$f"
           done
@@ -395,7 +397,7 @@ jobs:
           # 3. 查找 sandbox 中的错误输出
           echo ""
           echo "--- Sandbox stderr ---"
-          find out/bazel -path "*kernel_aarch64_config*" -name "stderr" 2>/dev/null | while read f; do
+          find out/bazel \( -path "*kernel_aarch64_config*" -o -path "*kernel_aarch64*" \) -name "stderr" 2>/dev/null | while read f; do
             echo "=== $f ==="
             cat "$f"
           done
@@ -437,6 +439,7 @@ jobs:
           path: |
             kernel_workspace/kernel_platform/out/bazel/**/command.log
             kernel_workspace/kernel_platform/out/bazel/**/*kernel_aarch64_config*
+            kernel_workspace/kernel_platform/out/bazel/**/*kernel_aarch64*
           retention-days: 3
           if-no-files-found: warn
       # 6. 打包产物
