@@ -50,7 +50,7 @@
 | `KERNELSU_BRANCH` | `next` | KernelSU Next 分支 |
 | `APPLY_CUSTOM_PATCHES` | `false` | 是否应用 `patches/` 目录中的自定义补丁 |
 | `APPLY_CUSTOM_DEFCONFIG` | `false` | 是否应用 `config/custom_defconfig.fragment` |
-| `ENABLE_DOCKER` | `false` | 是否开启 Docker/容器 内核支持 |
+| `ENABLE_DOCKER` | `true` | 是否开启 Docker/容器 内核支持 |
 
 ## 📂 项目结构
 
@@ -69,18 +69,19 @@
 
 ## 🐳 Docker 支持
 
-本项目预置了 Docker/容器 运行所需的完整内核配置（`config/docker_defconfig.fragment`），包含：
+本项目预置了 Docker/容器 运行所需的**保守型补充配置**（`config/docker_defconfig.fragment`），会在启用 Docker 选项时注入。
 
-- **命名空间隔离**: NET_NS, PID_NS, IPC_NS, UTS_NS, USER_NS
-- **Cgroups 资源控制**: CPU, Memory, Device, Freezer 等
-- **网络支持**: VETH, Bridge, Netfilter, NAT, IPVS 等
-- **文件系统**: OverlayFS, ext4 ACL/Security
-- **安全**: Seccomp, Keys
+- **模块化网络支持**: VETH, Bridge, MACVLAN, IPVLAN, VXLAN, NAT, IPv6 NAT, nftables, IPVS 相关模块
+- **模块化文件系统支持**: OverlayFS
+- **基础能力来源**: 命名空间、cgroups、seccomp 等基础容器能力依赖上游 GKI 默认配置
+- **设计目标**: 尽量避免把高风险 Docker 选项直接编进内核，同时保留 Docker 常用运行能力，降低 GKI/KMI 兼容性问题和不开机概率
 
 使用步骤：
 1. Action 构建时勾选 `开启 Docker/容器 支持`
 2. 刷入编译好的内核
 3. 参考相关教程在手机上安装 Docker 运行环境
+
+> ⚠️ 当前 Docker 支持仍是实验性能力，但不是“禁用 Docker”。它的思路是：保留上游 GKI 已有的基础容器能力，只额外补 Docker 运行时常缺的模块。像额外 `cgroup` 控制器、`AppArmor`、`Btrfs` 这类更激进的配置，建议自行放到 `config/custom_defconfig.fragment` 里逐项验证，不要默认一起开启。
 
 ## 🔧 自定义补丁
 
