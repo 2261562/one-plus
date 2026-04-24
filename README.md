@@ -60,8 +60,10 @@
 │   └── workflows/
 │       └── build-kernel.yml       # GitHub Actions 主工作流
 ├── config/
-│   ├── docker_defconfig.fragment  # Docker 支持所需的内核配置
+│   ├── docker_defconfig.fragment  # 旧版 Docker fragment（已弃用）
 │   └── custom_defconfig.fragment  # 自定义内核配置（模板）
+├── scripts/
+│   └── enable_docker.sh           # Docker 配置注入脚本
 ├── patches/
 │   └── README.md                  # 自定义补丁说明
 └── README.md                      # 本文件
@@ -69,19 +71,20 @@
 
 ## 🐳 Docker 支持
 
-本项目预置了 Docker/容器 运行所需的**保守型补充配置**（`config/docker_defconfig.fragment`），会在启用 Docker 选项时注入。
+本项目的 Docker 开关现在会执行 `scripts/enable_docker.sh`，直接修改源码树里的 `gki_defconfig`，而不是再走 `docker_defconfig.fragment`。
 
-- **模块化网络支持**: VETH, Bridge, MACVLAN, IPVLAN, VXLAN, NAT, IPv6 NAT, nftables, IPVS 相关模块
-- **模块化文件系统支持**: OverlayFS
-- **基础能力来源**: 命名空间、cgroups、seccomp 等基础容器能力依赖上游 GKI 默认配置
-- **设计目标**: 尽量避免把高风险 Docker 选项直接编进内核，同时保留 Docker 常用运行能力，降低 GKI/KMI 兼容性问题和不开机概率
+- **参考来源**: 方案吸收了你提供的“小米直注入 defconfig”思路
+- **当前构建基线**: 实际使用的是源码树内的 `gki_defconfig`，不是仓库里的 `config/current_defconfig`
+- **OnePlus 特化**: 保留 namespaces / cgroups / seccomp 等 Docker 核心能力，同时把最容易导致 GKI/KMI 问题的网络/存储驱动保持为 `=m`
+- **风险规避**: 默认禁用 PPTP/H323/FTP/TFTP 等旧式 NAT helper，避免触发 KMI symbol protection
+- **扩展方式**: 更激进的容器能力请放到 `config/custom_defconfig.fragment` 中逐项验证
 
 使用步骤：
 1. Action 构建时勾选 `开启 Docker/容器 支持`
 2. 刷入编译好的内核
 3. 参考相关教程在手机上安装 Docker 运行环境
 
-> ⚠️ 当前 Docker 支持仍是实验性能力，但不是“禁用 Docker”。它的思路是：保留上游 GKI 已有的基础容器能力，只额外补 Docker 运行时常缺的模块。像额外 `cgroup` 控制器、`AppArmor`、`Btrfs` 这类更激进的配置，建议自行放到 `config/custom_defconfig.fragment` 里逐项验证，不要默认一起开启。
+> ⚠️ 这不是直接照搬其他机型的完整 Docker 配置。当前脚本是“参考后按 OnePlus 树收敛”的版本：会显式打开 Docker 需要的核心配置，但不会默认把 `BLK_CGROUP`、额外 cgroup 控制器、`AppArmor`、`Btrfs` 这类高风险项一起硬开，以降低再次 bootloop 的概率。
 
 ## 🔧 自定义补丁
 
