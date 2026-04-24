@@ -180,31 +180,60 @@ jobs:
         run: |
           cd kernel_workspace/kernel_platform
 
-          # 1. 删除 protected exports 文件（阻止 symbol protection 检查报错）
+          # 删除 protected exports 文件，避免 symbol protection 检查阻塞构建
           echo "🔧 清理 ABI 保护导出文件..."
           find . -name "abi_gki_protected_exports_*" -type f -exec rm -f {} + 2>/dev/null || true
 
-          # 2. Docker 配置引入的新导出符号需要加入 KMI 符号表
-          #    CONFIG_USER_NS=y 使 from_kuid 等从 inline 变为实际导出函数
+      - name: 添加 Docker 相关 KMI 符号
+        if: github.event.inputs.ENABLE_DOCKER == 'true'
+        run: |
+          cd kernel_workspace/kernel_platform
+
+          # CONFIG_USER_NS=y 会让部分 kuid helper 变成真实导出符号
           DOCKER_SYMBOLS="
           from_kuid
           from_kuid_munged
           make_kuid
           "
+
           echo "🔧 添加 Docker 相关符号到 KMI 符号表..."
-          for f in $(find . -path "*/android/abi_gki_aarch64*" -not -name "*protected*" -type f 2>/dev/null); do
-            echo "" >> "$f"
-            echo "# Docker/容器支持: user namespace 符号" >> "$f"
+
+          find . -path "*/android/abi_gki_aarch64*" -not -name "*protected*" -type f 2>/dev/null | sort | while read -r f; do
+            base="$(basename "$f")"
+
+            case "$base" in
+              abi_gki_aarch64|abi_gki_aarch64_*)
+                ;;
+              *)
+                continue
+                ;;
+            esac
+
+            # 只修改纯文本 KMI symbol list，跳过 .stg 等其他 ABI 产物
+            case "$base" in
+              *.*)
+                continue
+                ;;
+            esac
+
+            if ! grep -q '^\[abi_symbol_list\]$' "$f" 2>/dev/null; then
+              continue
+            fi
+
+            added_any=false
             for sym in $DOCKER_SYMBOLS; do
-              # 检查符号是否已存在
               if ! grep -q "^[[:space:]]*${sym}$" "$f" 2>/dev/null; then
-                echo "  $sym" >> "$f"
+                if [ "$added_any" = false ]; then
+                  printf '\n' >> "$f"
+                  added_any=true
+                fi
+                # 保持为“纯符号行”，避免缩进把 configparser 触发成续行解析
+                printf '%s\n' "$sym" >> "$f"
                 echo "  ✅ 已添加 $sym → $f"
               fi
             done
           done
 
-          # 提交修改
           cd common && git add -A && git commit -m "Add Docker symbols to KMI list" || true
           cd ../msm-kernel && git add -A && git commit -m "Add Docker symbols to KMI list" || true
       - name: 移除 -dirty 后缀
