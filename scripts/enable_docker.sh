@@ -46,36 +46,23 @@ apply_docker_profile() {
   local file="$1"
   echo "Injecting Docker profile into ${file}"
 
-  # Core container primitives. Most are already enabled on many Android GKI trees,
-  # but we still write them explicitly so Docker builds are deterministic.
-  set_config "$file" CONFIG_NAMESPACES y
-  set_config "$file" CONFIG_NET_NS y
-  set_config "$file" CONFIG_PID_NS y
-  set_config "$file" CONFIG_IPC_NS y
-  set_config "$file" CONFIG_UTS_NS y
-  set_config "$file" CONFIG_USER_NS y
+  # Keep this profile intentionally narrow and close to the previously working
+  # "append to gki_defconfig" approach from this repo.
+  #
+  # We do NOT re-write namespaces / cgroups / ipvs / nftables here because
+  # they are already present in the base OnePlus defconfig, and over-touching
+  # them made Kleaf / KMI behavior worse on this tree.
 
-  set_config "$file" CONFIG_CGROUPS y
-  set_config "$file" CONFIG_CGROUP_DEVICE y
-  set_config "$file" CONFIG_CGROUP_CPUACCT y
-  set_config "$file" CONFIG_CGROUP_FREEZER y
-  set_config "$file" CONFIG_CGROUP_SCHED y
-  set_config "$file" CONFIG_FAIR_GROUP_SCHED y
-  set_config "$file" CONFIG_CPUSETS y
-  set_config "$file" CONFIG_PROC_PID_CPUSET y
-  set_config "$file" CONFIG_MEMCG y
-  set_config "$file" CONFIG_MEMCG_KMEM y
-  set_config "$file" CONFIG_CGROUP_PIDS y
-  set_config "$file" CONFIG_CGROUP_BPF y
-
+  # Basic runtime features.
   set_config "$file" CONFIG_KEYS y
   set_config "$file" CONFIG_SECCOMP y
   set_config "$file" CONFIG_SECCOMP_FILTER y
   set_config "$file" CONFIG_POSIX_MQUEUE y
+  set_config "$file" CONFIG_TMPFS_XATTR y
+  set_config "$file" CONFIG_TMPFS_POSIX_ACL y
 
   # Docker core networking and storage.
-  # Keep the most sensitive drivers as modules on this OnePlus tree to reduce
-  # the chance of GKI/KMI runtime breakage.
+  # These remain modules to reduce the chance of runtime GKI/KMI breakage.
   set_config "$file" CONFIG_VETH m
   set_config "$file" CONFIG_BRIDGE m
   set_config "$file" CONFIG_BRIDGE_NETFILTER m
@@ -92,38 +79,6 @@ apply_docker_profile() {
   set_config "$file" CONFIG_IP6_NF_NAT m
   set_config "$file" CONFIG_IP6_NF_TARGET_MASQUERADE m
   set_config "$file" CONFIG_OVERLAY_FS m
-
-  # nftables / IPVS support is useful for modern Docker stacks and some K8s setups.
-  set_config "$file" CONFIG_NF_TABLES y
-  set_config "$file" CONFIG_NFT_CT y
-  set_config "$file" CONFIG_NFT_MASQ y
-  set_config "$file" CONFIG_IP_VS y
-  set_config "$file" CONFIG_IP_VS_NFCT y
-  set_config "$file" CONFIG_IP_VS_PROTO_TCP y
-  set_config "$file" CONFIG_IP_VS_PROTO_UDP y
-  set_config "$file" CONFIG_IP_VS_RR y
-  set_config "$file" CONFIG_NETFILTER_XT_MATCH_IPVS y
-
-  # These legacy helpers are not needed for Docker itself and previously caused
-  # KMI symbol protection failures when built as modules.
-  unset_config "$file" CONFIG_NF_CONNTRACK_AMANDA
-  unset_config "$file" CONFIG_NF_CONNTRACK_FTP
-  unset_config "$file" CONFIG_NF_CONNTRACK_H323
-  unset_config "$file" CONFIG_NF_CONNTRACK_IRC
-  unset_config "$file" CONFIG_NF_CONNTRACK_NETBIOS_NS
-  unset_config "$file" CONFIG_NF_CONNTRACK_PPTP
-  unset_config "$file" CONFIG_NF_CONNTRACK_SANE
-  unset_config "$file" CONFIG_NF_CONNTRACK_TFTP
-  unset_config "$file" CONFIG_NF_NAT_AMANDA
-  unset_config "$file" CONFIG_NF_NAT_FTP
-  unset_config "$file" CONFIG_NF_NAT_H323
-  unset_config "$file" CONFIG_NF_NAT_IRC
-  unset_config "$file" CONFIG_NF_NAT_PPTP
-  unset_config "$file" CONFIG_NF_NAT_TFTP
-
-  # Keep the OnePlus-specific high-risk cgroup block untouched by default.
-  # Enabling these blindly made this tree much more likely to bootloop.
-  unset_config "$file" CONFIG_CGROUP_NET_CLASSID
 }
 
 for config_file in "$@"; do
